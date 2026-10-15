@@ -1,0 +1,10 @@
+.env
+reports/
+__pycache__/
+*.pyc
+.venv/
+
+business_context.json
+**/business_context.json
+
+data/
