@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-15T11:46:45+00:00",
+  "feeds": {
+    "cn_phishshield": {
+      "file": "phishshield_blacklist.js",
+      "sha256": "f7f11171e10137855f561a14af1ff9f4b3008d8354b61eda2359aa0109ad0882",
+      "entries": 41,
+      "license": "MIT（仓库声明；请核验使用条件）",
+      "source_url": "https://raw.githubusercontent.com/Lu-yanmo/phishshield/main/common/blacklist.js",
+      "project_url": "https://github.com/Lu-yanmo/phishshield"
+    },
+    "cn_ipguard": {
+      "file": "ipguard_blacklist.txt",
+      "sha256": "952ab0c03d84e7316347288355d5feaabc2b5b40dfdc51f16048edf92f2a97bd",
+      "entries": 4556,
+      "license": "CC BY 4.0（署名、保留注释、标记修改）",
+      "source_url": "https://raw.githubusercontent.com/chxovo/IPguard/main/blacklist.txt",
+      "project_url": "https://github.com/chxovo/IPguard"
+    },
+    "cn_antiad": {
+      "file": "anti_ad_domains.txt",
+      "sha256": "0c760cfb34f1d2726754591b9e76841df0a81f2aec168d9469b4f68b748c02ec",
+      "entries": 110164,
+      "license": "仓库 MIT；聚合上游许可需要机构额外核实",
+      "source_url": "https://raw.githubusercontent.com/privacy-protection-tools/anti-AD/master/anti-ad-domains.txt",
+      "project_url": "https://github.com/privacy-protection-tools/anti-AD"
+    }
+  },
+  "note": "数据原样镜像，不代表逐条核实；IPGuard 保留原行注释，anti-AD 仅广告/追踪信息。"
+}
