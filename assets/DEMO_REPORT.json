@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.9.0",
+  "schema_version": "2.3.0",
   "report_id": "DEMO-NO-ACTUAL-SCAN",
   "checked_at": "2026-10-15T00:00:00Z",
   "domain": "example.com",
@@ -82,7 +82,7 @@
     "tls": {
       "status": "skipped",
       "checked_at": "2026-10-15T10:07:22+00:00",
-      "summary": "默认不主动连接目标站点",
+      "summary": "合成示例未执行 TLS 握手；实际 audit 默认检查公网 TLS，可用 --no-tls-probe 关闭",
       "data": {},
       "error": null,
       "source_url": null

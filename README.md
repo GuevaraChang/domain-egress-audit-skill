@@ -22,7 +22,7 @@ python scripts/domain_audit.py audit --domain example.com
 | PhishShield | 不需要 | 自动更新的公开钓鱼域名候选名单 |
 | IPGuard | 不需要 | 自动更新的公开攻击 IP 名单（共享 IP 弱关联） |
 | anti-AD | 不需要，需关注上游许可 | 默认检查广告追踪名单，不能用于恶意定性 |
-| urlscan.io | 可选 | 默认查询完整可见历史并补查关联子域名；配 Key 后默认进行 Private 实时网页扫描 |
+| urlscan.io | 可选 | 默认查询完整可见历史并补查关联子域名；仅查询已有记录与详情，不提交新扫描 |
 | VirusTotal | 可选，须符合官方条款 | 多引擎域名威胁检测结果 |
 
 **API Key 可以在对话中提供给具有本地文件权限的 Agent**，由其通过标准输入写入项目根目录 `.env`，例如：
@@ -64,12 +64,11 @@ python -m unittest discover -s tests -v
 
 **网站历史扫描：** 默认查询 urlscan 账号可见的最多 **15 条**历史扫描，并逐条读取完整 Result JSON，提取历史页面标题、跳转、页面 IP、请求数量、第三方资源域名与历史恶意标记。网页截图只提供历史结果链接，不会下载内容或重新扫描。可通过 `--history-limit 30` 修改上限（最多 50；限额取决于账号，不能保证覆盖全部历史）。精确主机无历史时，会再次查询该域名下的相关子域名；关联结果单独标记，不作为当前主机的直接风险证据。账户可搜索的历史可能仅有最近 90 天（以接口 `search_date_limit_days` 为准），查不到记录不代表安全。
 
-**实时网页扫描：** 当配置了 urlscan API Key，且本机 DNS 得到公网 IP 时，**默认提交一次 `https://域名/` 的远程网页扫描**；不需要额外参数。始终默认 `private`，不会自动改成公开。可使用 `--no-live-scan` 关闭；显式使用 `--live-visibility public` 才会公开。远程服务会访问站点并获得目标域名与页面信息，请勿检测非公开或含私密信息的网址。受配额或目标扫描限制时显示原因；未完成时只标记“已提交，结果待出”，不假装有扫描结果。
+**网页扫描策略：** 仅查询 urlscan 已有历史记录与详情，不提交实时网页扫描任务。实时提交实现及 `--live-scan`、`--no-live-scan`、`--live-visibility` 选项已移除，旧参数会报错退出；配置 API Key 或历史记录为空都不会触发新扫描。
 
 ```bash
-python scripts/domain_audit.py audit --domain example.com                         # 默认：历史分析 + Private 实时扫描 + TLS
+python scripts/domain_audit.py audit --domain example.com                         # 默认：历史分析 + TLS，不提交网页扫描
 python scripts/domain_audit.py audit --domain example.com --history-limit 30      # 扩大历史详情数量（消耗更多配额）
-python scripts/domain_audit.py audit --domain example.com --no-live-scan          # 不向 urlscan 提交新的扫描
 python scripts/domain_audit.py audit --domain example.com --no-tls-probe          # 关闭默认 TLS 连接
 ```
 

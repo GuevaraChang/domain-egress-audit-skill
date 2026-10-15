@@ -16,7 +16,7 @@ header{margin-bottom:24px}h1{font-size:26px;margin:0 0 8px;letter-spacing:-.02em
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid .panel{margin:0}.checklist{list-style:none;padding:0;margin:0}
 .checklist li{display:flex;gap:12px;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #edf0f4;font-size:14px}
 .checklist li:last-child{border:0}.state{white-space:nowrap;font-weight:700}.state.ok{color:#258064}.state.warn{color:#a15f00}.state.mute{color:#707c8d}
-details{border-top:1px solid #e9eef3;padding:14px 0}details summary{cursor:pointer;font-size:14px;font-weight:650}
+.history-item{border-top:1px solid #edf0f4;padding:12px 0}.history-item p{margin:6px 0}.history-stats{background:#f5f7fa;border-radius:8px;padding:10px;font-size:13px}details{border-top:1px solid #e9eef3;padding:14px 0}details summary{cursor:pointer;font-size:14px;font-weight:650}
 pre{white-space:pre-wrap;word-wrap:break-word;background:#f3f6fa;border-radius:8px;padding:12px;font-size:12px;max-height:380px;overflow:auto}
 a{color:#1d5aa6}footer{font-size:12px;color:#586679;line-height:1.7;margin-top:22px}
 @media(max-width:660px){main{margin:18px auto;padding:0 12px 28px}.panel{padding:18px}.grid{grid-template-columns:1fr}.status{font-size:22px}h1{font-size:23px}}
@@ -26,6 +26,7 @@ a{color:#1d5aa6}footer{font-size:12px;color:#586679;line-height:1.7;margin-top:2
 <section class="panel hero unknown"><div class="small">检查结论</div><div class="status">信息不足，暂时无法判断</div>
 <p class="small">关键检查尚未完成：VirusTotal 域名信誉。</p><p class="recommend">建议：建议先补齐下方未完成的检查，再决定是否访问或输入敏感信息。</p></section>
 <section class="panel"><h2>发现的问题</h2><p class="quiet">本次成功完成的检查中，没有发现明显风险线索。</p></section>
+<section class="panel"><h2>网站历史扫描</h2><p class="small">仅查询已有历史记录与详情，不提交新的 urlscan 网页扫描任务。</p><p class="quiet">未配置 urlscan API Key，网站历史扫描尚未执行。</p></section>
 <section class="grid"><div class="panel"><h2>已经检查</h2><ul class="checklist"><li><span>DNS 解析</span><span class="state ok">已完成</span></li><li><span>域名注册信息</span><span class="state ok">已完成</span></li><li><span>IP / 服务器归属</span><span class="state ok">已完成</span></li><li><span>网站证书历史</span><span class="state ok">已完成</span></li><li><span>免费开源安全名单</span><span class="state ok">已完成</span></li></ul></div>
 <div class="panel"><h2>未完成或未配置</h2><ul class="checklist"><li><span>网站历史扫描</span><span class="state mute">未准备</span></li><li><span>VirusTotal 安全检测</span><span class="state mute">未准备</span></li><li><span>HTTPS 连接测试</span><span class="state mute">未检查</span></li></ul></div></section>
 <section class="panel"><h2>技术详情（需要时再看）</h2><p class="small">点击展开即可查看原始证据，不需要阅读全部内容。</p><details><summary>DNS 解析 · 已完成</summary><p class="fine">示例：查询已完成　</p><pre>{
@@ -51,7 +52,7 @@ a{color:#1d5aa6}footer{font-size:12px;color:#586679;line-height:1.7;margin-top:2
   &quot;registrar&quot;: &quot;Example Registrar&quot;
 }</pre></details><details><summary>IP / 服务器归属 · 已完成</summary><p class="fine">示例：网络归属查询已完成　</p><pre>{
   &quot;results&quot;: []
-}</pre></details><details><summary>网站证书历史 · 已完成</summary><p class="fine">示例：已查询证书历史　</p><pre>{}</pre></details><details><summary>网站历史扫描 · 未准备</summary><p class="fine">可配置 urlscan.io API Key 查询网页历史　</p><pre>{}</pre></details><details><summary>VirusTotal 安全检测 · 未准备</summary><p class="fine">可配置授权有效的 VirusTotal API Key 查询域名信誉　</p><pre>{}</pre></details><details><summary>HTTPS 连接测试 · 未检查</summary><p class="fine">默认不主动连接目标站点　</p><pre>{}</pre></details><details><summary>免费开源安全名单 · 已完成</summary><p class="fine">合成示例：2 个公开规则库已检查，未命中；不代表域名安全　</p><pre>{
+}</pre></details><details><summary>网站证书历史 · 已完成</summary><p class="fine">示例：已查询证书历史　</p><pre>{}</pre></details><details><summary>网站历史扫描 · 未准备</summary><p class="fine">可配置 urlscan.io API Key 查询网页历史　</p><pre>{}</pre></details><details><summary>VirusTotal 安全检测 · 未准备</summary><p class="fine">可配置授权有效的 VirusTotal API Key 查询域名信誉　</p><pre>{}</pre></details><details><summary>HTTPS 连接测试 · 未检查</summary><p class="fine">合成示例未执行 TLS 握手；实际 audit 默认检查公网 TLS，可用 --no-tls-probe 关闭　</p><pre>{}</pre></details><details><summary>免费开源安全名单 · 已完成</summary><p class="fine">合成示例：2 个公开规则库已检查，未命中；不代表域名安全　</p><pre>{
   &quot;matched&quot;: [],
   &quot;feeds&quot;: [
     {

@@ -20,7 +20,7 @@ spec.loader.exec_module(a)
 class ChatKeyConfigTests(unittest.TestCase):
     def test_only_two_optional_credentials_supported(self):
         self.assertEqual(set(a.CREDENTIAL_NAMES), {'URLSCAN_API_KEY','VT_API_KEY'})
-        self.assertEqual(len(a.report_html.SOURCE_NAMES), 9)
+        self.assertEqual(len(a.report_html.SOURCE_NAMES), 8)
         for removed in ('OLD_API_KEY','UNSUPPORTED_API_KEY'):
             self.assertNotIn(removed, a.CONFIG_NAMES)
 
@@ -35,8 +35,10 @@ class ChatKeyConfigTests(unittest.TestCase):
                 self.assertEqual(a.set_key_cmd(args), 0)
                 self.assertEqual(a.read_env()['URLSCAN_API_KEY'], secret)
             self.assertNotIn(secret, capture.getvalue())
-            self.assertEqual(os.stat(envfile).st_mode & 0o777, 0o600)
-            self.assertIn('ONBOARDING_DONE=yes', envfile.read_text())
+            # Windows does not implement POSIX mode bits; keep secret handling checks on all platforms.
+            if os.name != 'nt':
+                self.assertEqual(os.stat(envfile).st_mode & 0o777, 0o600)
+            self.assertIn('ONBOARDING_DONE=yes', envfile.read_text(encoding='utf-8'))
 
     def test_unknown_key_name_rejected_and_no_write(self):
         with tempfile.TemporaryDirectory() as temp:

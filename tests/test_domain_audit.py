@@ -306,8 +306,8 @@ class TestDomainAudit(unittest.TestCase):
              patch.object(audit, 'tls_check', return_value=audit.source('skipped')), \
              patch.object(audit.local_ioc, 'inspect_cached', return_value=audit.source('not_configured')):
             report = audit.build_report('example.com', 'example.com', {'usage_type': 'business'}, env={})
-        self.assertEqual(report['schema_version'], '2.2.0')
-        self.assertEqual(len(report['evidence_ledger']), 9)
+        self.assertEqual(report['schema_version'], '2.3.0')
+        self.assertEqual(len(report['evidence_ledger']), 8)
         self.assertIn('cdn.vendor.com', [x['hostname'] for x in report['asset_inventory']])
         md = audit.render_markdown(report)
         self.assertIn('已检查与未检查', md)

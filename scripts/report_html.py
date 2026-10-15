@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 SOURCE_NAMES = {
     'rdap': '域名注册信息', 'dns': 'DNS 解析', 'ripestat': 'IP / 服务器归属',
-    'crtsh': '网站证书历史', 'urlscan': '网站历史扫描', 'urlscan_live': '实时网页扫描',
+    'crtsh': '网站证书历史', 'urlscan': '网站历史扫描',
     'virustotal': 'VirusTotal 安全检测', 'tls': 'HTTPS 连接测试',
     'local_ioc': '免费开源安全名单',
 }
@@ -52,8 +52,6 @@ def source_view(key, item, problems):
     if state == 'ok':
         if key == 'urlscan' and (item.get('data') or {}).get('history_scope') == 'related_subdomains_only':
             return ('mute', '仅关联子域名', '没有目标主机的直接历史，以下仅为相关子域名线索')
-        if key == 'urlscan_live':
-            return ('ok', '实时检查完成', 'urlscan 已返回本次网站扫描详情')
         if key == 'local_ioc':
             records = item.get('data') or {}
             feeds = records.get('feeds') or []
@@ -91,7 +89,6 @@ def render(report):
     mapping = {'rdap': {'new_domain', 'young_domain'}, 'dns': {'non_public_ip'},
                'virustotal': {'virustotal_detection'},
                'urlscan': {'off_domain_redirect', 'urlscan_historical_malicious'},
-               'urlscan_live': {'urlscan_live_malicious'},
                'local_ioc': {'local_phishing_ioc', 'local_ip_association', 'local_adtracking'},
                'tls': {'tls_probe_failed'}}
     positive = {k for k, v in mapping.items() if any(f.get('type') in v for f in display_findings)}
@@ -102,7 +99,7 @@ def render(report):
     problem_html = ''.join(problem_card(f) for f in display_findings[:7]) if display_findings else '<p class="quiet">本次成功完成的检查中，没有发现明显风险线索。</p>'
     successful = []
     unknown = []
-    for key in ('dns', 'rdap', 'ripestat', 'crtsh', 'urlscan', 'urlscan_live', 'local_ioc', 'virustotal', 'tls'):
+    for key in ('dns', 'rdap', 'ripestat', 'crtsh', 'urlscan', 'local_ioc', 'virustotal', 'tls'):
         item = sources.get(key) or {}
         kind, state, detail = source_view(key, item, positive)
         row = f'<li><span>{esc(SOURCE_NAMES.get(key, key))}</span><span class="state {kind}">{esc(state)}</span></li>'
@@ -159,27 +156,6 @@ def render(report):
         history_html = '<p class="quiet">未配置 urlscan API Key，网站历史扫描尚未执行。</p>'
     else:
         history_html = '<p class="quiet">历史扫描数据暂时不可用，未能作出判断。</p>'
-    live = sources.get('urlscan_live') or {}
-    live_info = live.get('data') or {}
-    live_status = live.get('status')
-    live_url = clean_href(live.get('source_url'))
-    live_link = f'<a href="{esc(live_url)}" rel="noopener noreferrer" target="_blank">查看本次实时扫描 ↗</a>' if live_url and live_status in ('ok','partial') else ''
-    if live_status == 'ok':
-        result = live_info.get('result') or {}
-        title = esc(result.get('page_title') or '无标题')
-        flagged = '<b class="state warn">urlscan 标记了可疑行为</b>' if result.get('urlscan_malicious') else '未发现 urlscan 的恶意标记（不代表安全）'
-        safe_domain = esc(report.get('domain','未知域名'))
-        live_html = (f'<p class="small">本次已通过 urlscan 远程浏览器检查 https://{safe_domain}/ 。</p>'
-                     f'<div class="history-stats"><b>扫描完成</b> · 标题：{title} · {flagged}</div>'
-                     f'<p class="small">{live_link}</p>')
-    elif live_status == 'partial':
-        live_html = f'<p class="small">实时扫描已提交，结果仍在生成中，稍后查看链接。{live_link}</p>'
-    elif live_status == 'not_configured':
-        live_html = '<p class="quiet">缺少 urlscan API Key：无法进行实时扫描。运行 setup 配置即可自动开启。</p>'
-    elif live_status == 'skipped':
-        live_html = '<p class="quiet">实时扫描已关闭，或目标没有确认的公网 IP。</p>'
-    else:
-        live_html = '<p class="quiet">实时扫描失败或被平台拒绝；请检查 API 配额、网络与可见性权限。</p>'
     domain = esc(report.get('domain', '未知域名'))
     checked = esc(report.get('checked_at') or '未知时间')
     rid = esc(report.get('report_id', '—'))
@@ -212,11 +188,10 @@ a{color:#1d5aa6}footer{font-size:12px;color:#586679;line-height:1.7;margin-top:2
 <section class="panel hero %s"><div class="small">检查结论</div><div class="status">%s</div>
 <p class="small">%s</p><p class="recommend">建议：%s</p></section>
 <section class="panel"><h2>发现的问题</h2>%s</section>
-<section class="panel"><h2>网站历史扫描</h2>%s</section>
-<section class="panel"><h2>本次实时网页扫描</h2>%s</section>
+<section class="panel"><h2>网站历史扫描</h2><p class="small">仅查询已有历史记录与详情，不提交新的 urlscan 网页扫描任务。</p>%s</section>
 <section class="grid"><div class="panel"><h2>已经检查</h2>%s</div>
 <div class="panel"><h2>未完成或未配置</h2>%s</div></section>
 <section class="panel"><h2>技术详情（需要时再看）</h2><p class="small">点击展开即可查看原始证据，不需要阅读全部内容。</p>%s</section>
 <footer>报告编号：%s。由公开数据源自动生成，只代表当前成功完成的检查；未查到不等于绝对安全。报告不主动批准、拦截或修改任何网络访问。</footer>
-</main></body></html>''' % (domain, domain, checked, esc(summary['level']), esc(summary['title']), esc(summary['reason']), esc(summary['recommendation']), problem_html, history_html, live_html, success_html, unknown_html, ''.join(details), rid)
+</main></body></html>''' % (domain, domain, checked, esc(summary['level']), esc(summary['title']), esc(summary['reason']), esc(summary['recommendation']), problem_html, history_html, success_html, unknown_html, ''.join(details), rid)
     return html_text

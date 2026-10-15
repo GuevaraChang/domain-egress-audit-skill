@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Free-source, read-only external FQDN due-diligence and reporting CLI.
 
-No paid threat intelligence. urlscan Private remote root-URL scanning is enabled by default when configured; it can be disabled.
+No paid threat intelligence. urlscan is read-only: existing history and result details only.
 """
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ import re
 import socket
 import ssl
 import sys
-import time
 from datetime import datetime, timezone
 from urllib.parse import quote, urlparse
 
@@ -30,12 +29,11 @@ import local_ioc
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV = ROOT / '.env'
-UA = 'DomainSafetySkill/2.2 (historical scan + default private live scan)'
+UA = 'DomainSafetySkill/2.3 (read-only historical scan)'
 TIMEOUT = 9
 RDAP_BOOTSTRAP = 'https://data.iana.org/rdap/dns.json'
 URLSCAN_SEARCH = 'https://urlscan.io/api/v1/search/'
 URLSCAN_RESULT = 'https://urlscan.io/api/v1/result/'
-URLSCAN_SUBMIT = 'https://urlscan.io/api/v1/scan/'
 UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 URLSCAN_HISTORY_DEFAULT = 15
 URLSCAN_HISTORY_LIMIT = 50
@@ -429,51 +427,6 @@ def urlscan_check(host, api_key, *, max_scans=URLSCAN_HISTORY_DEFAULT):
         return source('error',summary='urlscan 历史扫描查询失败，不能视为安全',error=exc,url=URLSCAN_SEARCH)
 
 
-def urlscan_live_check(host, api_key, *, enabled=True, visibility='private', public_ips=None, attempts=5, delay=4):
-    """Submit a private scan by default when configured; never downgrade to public."""
-    if not enabled:
-        return source('skipped', summary='已通过 --no-live-scan 关闭实时网站扫描')
-    if not api_key:
-        return source('not_configured', summary='实时网站扫描需先配置 urlscan.io API Key')
-    if visibility not in ('private','unlisted','public'):
-        return source('error', error='无效扫描可见性')
-    if not public_ips:
-        return source('skipped', summary='DNS 未确认公网地址，不提交实时网站扫描')
-    # The scan URL is constructed ONLY from the validated FQDN, never a user-provided URL.
-    scan_url = 'https://' + host + '/'
-    try:
-        response = requests.post(URLSCAN_SUBMIT, headers={'api-key': api_key, 'Content-Type':'application/json',
-                                  'User-Agent':UA}, json={'url':scan_url, 'visibility':visibility},
-                                 timeout=12, allow_redirects=False)
-        response.raise_for_status()
-        if response.status_code >= 300:
-            raise requests.HTTPError('urlscan 提交出现重定向，已拒绝')
-        doc = response.json()
-        scan_id = str(doc.get('uuid') or '')
-        if not UUID_PATTERN.fullmatch(scan_id):
-            raise ValueError('urlscan 未返回有效扫描 ID')
-        link = 'https://urlscan.io/result/' + scan_id + '/'
-        for i in range(max(0, min(int(attempts), 8))):
-            if i or delay:
-                time.sleep(max(0, min(float(delay), 8)))
-            try:
-                detail = urlscan_fetch_detail(scan_id, api_key, host)
-                return source('ok', summary='远程实时网页扫描已完成（默认 Private），这不是本机直接扫描',
-                              data={'submission_status':'complete', 'visibility':visibility,
-                                    'scan_url':scan_url, 'result':detail}, url=link)
-            except requests.HTTPError as exc:
-                if exc.response is None or exc.response.status_code != 404:
-                    break
-            except (requests.RequestException, ValueError):
-                break
-        return source('partial', summary='已提交实时扫描，平台仍在处理；稍后可通过结果链接查看',
-                      data={'submission_status':'pending', 'visibility':visibility,
-                            'scan_url':scan_url, 'scan_id':scan_id}, url=link)
-    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-        return source('error', summary='实时扫描提交失败，可能受账号配额或可见性权限限制；不会自动切换到公开模式',
-                      error=exc, url='https://urlscan.io/docs/api/')
-
-
 def effective_vt_usage(env, ctx=None):
     """Only enable free VT when the user has acknowledged its actual terms.
 
@@ -605,7 +558,6 @@ def evidence_ledger(report):
         'virustotal': ('VirusTotal', '第三方检测统计，不等于恶意定性；某些用途自动跳过', 'last_analysis_date'),
         'tls': ('可选 TLS 探测', '仅在明确授权时可做的实时目标连接', None),
         'local_ioc': ('开源本地安全名单', '离线匹配公开名单；域名精确匹配与共享 IP 弱关联不同，广告追踪不等于恶意', None),
-        'urlscan_live': ('urlscan 可选实时扫描', '用户明确选择时才提交，可能暴露所访问的 URL；不会自动公开', None),
     }
     ledger = []
     status_counts = {k: 0 for k in ('ok', 'empty', 'error', 'not_configured', 'skipped')}
@@ -726,15 +678,8 @@ def evaluate(report):
         pending.append('VirusTotal 数据不可用')
     # vt.status=skipped 且因为某些用途限制时，是合规跳过而不是技术无风险。
     us = src['urlscan']
-    live = src.get('urlscan_live') or {}
-    if live.get('status') == 'ok' and ((live.get('data') or {}).get('result') or {}).get('urlscan_malicious') is True:
-        findings.append({'severity':'medium', 'type':'urlscan_live_malicious', 'confidence':'medium',
-                         'evidence_ids':ids('urlscan_live'),
-                         'detail':'本次可选实时网页扫描被 urlscan 标为恶意，需核实具体页面和相关证据'})
     if us['status'] == 'partial':
         pending.append('urlscan 部分历史扫描详情未能获取，结果不完整')
-    if live.get('status') in ('error','partial'):
-        pending.append('urlscan 实时扫描未完成，具体原因见报告详情')
     if us['status'] in ('ok','partial'):
         exact_records = [x for x in us['data'].get('results', []) if x.get('relation_to_target', 'exact_fqdn') == 'exact_fqdn']
         flagged = [x for x in exact_records if x.get('urlscan_malicious') is True]
@@ -905,7 +850,7 @@ def render_markdown(report):
     return '\n'.join(lines) + '\n'
 
 
-def build_report(host, registered, ctx, tls_probe=False, env=None, ioc_db=None, history_limit=URLSCAN_HISTORY_DEFAULT, live_scan=True, live_visibility="private"):
+def build_report(host, registered, ctx, tls_probe=False, env=None, ioc_db=None, history_limit=URLSCAN_HISTORY_DEFAULT):
     env = env if env is not None else read_env()
     d = dns_check(host, registered)
     r = rdap_check(registered)
@@ -919,11 +864,9 @@ def build_report(host, registered, ctx, tls_probe=False, env=None, ioc_db=None, 
         'local_ioc': local_ioc.inspect_cached(host, [x['ip'] for x in ips if x.get('globally_routable')],
                                               db=ioc_db or local_ioc.DEFAULT_DB),
         'tls': tls_check(host, int(ctx.get('target_port') or 443), ips, tls_probe),
-        'urlscan_live': urlscan_live_check(host, env.get('URLSCAN_API_KEY', ''), enabled=live_scan,
-                                          visibility=live_visibility, public_ips=[v['ip'] for v in ips if v['globally_routable']]),
     }
     instant = datetime.now(timezone.utc)
-    report = {'schema_version': '2.2.0',
+    report = {'schema_version': '2.3.0',
               'report_id': 'EDA-' + instant.strftime('%Y%m%dT%H%M%SZ') + '-' + re.sub(r'[^a-z0-9]+', '-', host)[:48],
               'checked_at': instant.isoformat(timespec='seconds'), 'domain': host,
               'registered_domain': registered, 'vt_usage': vt_usage,
@@ -969,7 +912,7 @@ def init_cmd(args):
     interactive = sys.stdin.isatty() and not args.non_interactive
     providers = [
       ('URLSCAN_API_KEY', 'urlscan.io', 'https://urlscan.io/user/signup/',
-       '注册并进入 Settings & API → New API Key；用于历史查询，并默认提交目标域名根路径的 Private 实时扫描（可 --no-live-scan 关闭）。'),
+       '注册并进入 Settings & API → New API Key；仅用于已有历史记录查询和详情分析，不提交新的网页扫描任务。'),
     ]
     for key, title, url, how in providers:
         if env.get(key) and not args.force:
@@ -1078,9 +1021,7 @@ def audit_cmd(args):
     if tls_probe:
         print('TLS：默认检查目标公网 IP:443（SNI 证书验证，不发送 HTTP 请求；可使用 --no-tls-probe 关闭）。')
     usage = effective_vt_usage(read_env(), ctx)
-    live_enabled = not getattr(args, 'no_live_scan', False)
-    if live_enabled:
-        print(f'配置了 urlscan Key 且目标解析到公网 IP 时，默认提交 https://{host}/ 的远程实时扫描，可见性：{getattr(args,"live_visibility","private")}；可通过 --no-live-scan 关闭。')
+    print('网站扫描：仅查询已有历史及详情，不提交新的 urlscan 扫描任务。')
     print(f'正在检查 {host}，检查完成后会生成易读的 HTML 报告。')
     db = getattr(args, 'ioc_db', str(local_ioc.DEFAULT_DB))
     if getattr(args, 'no_auto_ioc_update', False):
@@ -1093,9 +1034,7 @@ def audit_cmd(args):
     if sync['status'] in ('partial', 'error'):
         print('本地 IOC 名单更新不完整：保留历史缓存，并在报告中说明；继续其他检查。')
     report = build_report(host, registered, ctx, tls_probe, ioc_db=db,
-                          history_limit=getattr(args, 'history_limit', URLSCAN_HISTORY_DEFAULT),
-                          live_scan=live_enabled,
-                          live_visibility=getattr(args,'live_visibility','private'))
+                          history_limit=getattr(args, 'history_limit', URLSCAN_HISTORY_DEFAULT))
     out = Path(args.output).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     previous, baseline_path = (None, None)
@@ -1200,9 +1139,6 @@ def main(argv=None):
     s_audit.add_argument('--tls-probe', action='store_true', help='兼容旧版参数；TLS 默认开启')
     s_audit.add_argument('--no-tls-probe', action='store_true', help='关闭默认 TLS 实时连接（仅被动查询）')
     s_audit.add_argument('--history-limit', type=int, choices=range(1, 51), metavar='1-50', default=15, help='默认分析最多 15 条历史扫描的详细结果；最多 50 条，受账号配额限制')
-    s_audit.add_argument('--live-scan', action='store_true', help='兼容旧版本；实时网站扫描现已默认开启')
-    s_audit.add_argument('--no-live-scan', action='store_true', help='不向 urlscan 远程提交实时网站扫描；仅查询历史记录')
-    s_audit.add_argument('--live-visibility', choices=['private','unlisted','public'], default='private', help='远程扫描结果可见性，默认 private，不自动降低隐私等级')
     s_audit.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB), help='本地安全名单 SQLite 路径')
     s_audit.add_argument('--no-auto-ioc-update', action='store_true', help='禁用自动更新，仍使用现有本地缓存')
     s_ioc_update = sub.add_parser('ioc-update', help='更新免费开源 IOC 名单；不发送被检测域名')

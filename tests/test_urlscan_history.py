@@ -1,10 +1,13 @@
-"""Offline urlscan detailed-history and opt-in remote scan tests."""
+"""Offline urlscan read-only detailed-history tests."""
 import sys
 import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import patch
 from argparse import Namespace
+import contextlib
+import io
+import json
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1] / 'scripts'))
 import domain_audit as audit
@@ -28,6 +31,50 @@ def detail():
             'verdicts':{'urlscan':{'malicious':True,'score':90}}}
 
 class HistoryTests(unittest.TestCase):
+    def test_default_audit_only_reads_urlscan_and_keeps_other_checks(self):
+        # Exercise the actual CLI, report builder, history parser and report writers.
+        # The HTTP transport rejects every call except the expected GET endpoints.
+        for empty, no_tls in ((False, False), (True, False), (False, True)):
+            with self.subTest(empty=empty, no_tls=no_tls), tempfile.TemporaryDirectory() as tmp:
+                calls = []
+                def transport(method, url, **kwargs):
+                    self.assertEqual(method.lower(), 'get')
+                    self.assertIn(url, (audit.URLSCAN_SEARCH, audit.URLSCAN_RESULT + UUID + '/'))
+                    calls.append(url)
+                    response = unittest.mock.Mock(status_code=200)
+                    response.json.return_value = ({'results':[]} if empty else search_result()) if url == audit.URLSCAN_SEARCH else detail()
+                    return response
+                dns = audit.source('ok', data={'ips':[{'ip':'1.1.1.1','globally_routable':True}], 'records':{}})
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(patch.object(audit, 'read_env', return_value={'URLSCAN_API_KEY':'TEST-SECRET', 'VT_API_KEY':'VT-SECRET', 'VT_API_TIER':'premium'}))
+                    stack.enter_context(patch.object(audit.requests.sessions.Session, 'request', side_effect=transport))
+                    checks = {}
+                    for name in ('dns_check','rdap_check','ripestat_check','crt_check','vt_check','tls_check'):
+                        checks[name] = stack.enter_context(patch.object(audit, name, return_value=dns if name == 'dns_check' else audit.source('ok')))
+                    ioc = stack.enter_context(patch.object(audit.local_ioc, 'inspect_cached', return_value=audit.source('ok')))
+                    refresh = stack.enter_context(patch.object(audit, 'auto_refresh_local_ioc', return_value={'status':'fresh_cache'}))
+                    stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                    flags = ['--no-tls-probe'] if no_tls else []
+                    self.assertEqual(audit.main(['audit','--domain','example.com','--no-prompt','--output',tmp,'--markdown'] + flags), 0)
+                self.assertEqual(calls, [audit.URLSCAN_SEARCH] * 2 if empty else [audit.URLSCAN_SEARCH, audit.URLSCAN_RESULT + UUID + '/'])
+                for check in checks.values():
+                    check.assert_called_once()
+                self.assertEqual(checks['tls_check'].call_args.args[-1], not no_tls)
+                ioc.assert_called_once()
+                refresh.assert_called_once()
+                result = next(Path(tmp).glob('*.json'))
+                report = json.loads(result.read_text(encoding='utf-8'))
+                self.assertEqual(set(report['sources']), {'dns','rdap','ripestat','crtsh','urlscan','virustotal','tls','local_ioc'})
+                self.assertEqual(len(report['evidence_ledger']), 8)
+                self.assertEqual(report['sources']['urlscan']['status'], 'empty' if empty else 'ok')
+                for suffix in ('.json','.html','.md'):
+                    content = result.with_suffix(suffix).read_text(encoding='utf-8')
+                    self.assertNotIn('TEST-SECRET', content)
+                    self.assertNotIn('urlscan_live', content)
+                    self.assertNotIn('本次实时网页扫描', content)
+                if not empty:
+                    self.assertEqual(report['sources']['urlscan']['data']['results'][0]['page_title'], 'Historical Login')
+
     def test_search_details_are_fetched_and_summarized_not_raw_sensitive(self):
         with patch.object(audit,'req_json',side_effect=[search_result(),detail()]) as req:
             res=audit.urlscan_check('example.com','test-key')
@@ -64,40 +111,6 @@ class HistoryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 audit.urlscan_fetch_detail('../private?key=abc','key','example.com')
         req.assert_not_called()
-
-    def test_default_live_submits_private(self):
-        response=unittest.mock.Mock(status_code=200)
-        response.json.return_value={'uuid':UUID}
-        with patch.object(audit.requests,'post',return_value=response) as post, \
-             patch.object(audit,'urlscan_fetch_detail',return_value={'page_title':'Demo'}):
-            result=audit.urlscan_live_check('example.com','key',public_ips=['1.1.1.1'],delay=0,attempts=1)
-        self.assertEqual(result['status'],'ok')
-        self.assertEqual(post.call_args.kwargs['json']['visibility'],'private')
-        self.assertEqual(post.call_count,1)
-
-    def test_explicit_no_live_scan_never_submits(self):
-        with patch.object(audit.requests,'post') as post:
-            result=audit.urlscan_live_check('example.com','key',enabled=False,public_ips=['1.1.1.1'])
-        post.assert_not_called()
-        self.assertEqual(result['status'],'skipped')
-
-    def test_opt_in_private_submits_only_domain_root(self):
-        response=unittest.mock.Mock(status_code=200)
-        response.json.return_value={'uuid':UUID}
-        with patch.object(audit.requests,'post',return_value=response) as post, \
-             patch.object(audit,'urlscan_fetch_detail',return_value={'page_title':'Safe Demo'}) as fetch:
-            res=audit.urlscan_live_check('example.com','key',enabled=True,visibility='private',
-                                         public_ips=['1.2.3.4'],delay=0,attempts=1)
-        self.assertEqual(res['status'],'ok')
-        self.assertEqual(post.call_args.kwargs['json'],{'url':'https://example.com/','visibility':'private'})
-        self.assertFalse(post.call_args.kwargs['allow_redirects'])
-        self.assertEqual(fetch.call_count,1)
-
-    def test_live_requires_public_ip_and_key(self):
-        with patch.object(audit.requests,'post') as post:
-            self.assertEqual(audit.urlscan_live_check('example.com','key',enabled=True,public_ips=[])['status'],'skipped')
-            self.assertEqual(audit.urlscan_live_check('example.com','',enabled=True,public_ips=['1.1.1.1'])['status'],'not_configured')
-        post.assert_not_called()
 
     def test_html_history_section_and_html_escape(self):
         rec=detail()
@@ -141,24 +154,25 @@ class HistoryTests(unittest.TestCase):
         self.assertIn('90',result['summary'])
         self.assertIn('不证明网站安全',result['summary'])
 
-    def test_report_shows_live_result_separately_from_missing_history(self):
-        record=audit.urlscan_scan_detail(detail(),UUID,'example.com')
+    def test_report_missing_history_has_no_live_scan_panel(self):
         r={'domain':'example.com','checked_at':'2026-10-15T12:00:00Z','report_id':'DEMO',
            'sources':{'urlscan':audit.source('empty',data={'search_date_limit_days':90}),
-                      'urlscan_live':audit.source('ok',data={'result':record},url=URL),
                       'dns':audit.source('ok'),'virustotal':audit.source('ok')},
            'assessment':{'findings':[]}}
         page=report_html.render(r)
-        self.assertIn('本次实时网页扫描',page)
+        self.assertNotIn('本次实时网页扫描',page)
         self.assertIn('最近 90 天',page)
-        self.assertIn('扫描完成',page)
-        self.assertIn('查看本次实时扫描',page)
+        self.assertIn('不提交新的 urlscan 网页扫描任务',page)
+        self.assertNotIn('实时扫描失败',page)
 
-    def test_cli_live_defaults_on_and_supports_disable(self):
-        with patch.object(audit,'audit_cmd',return_value=0) as cmd:
-            self.assertEqual(audit.main(['audit','--domain','example.com']),0)
-            self.assertFalse(cmd.call_args.args[0].no_live_scan)
-            self.assertEqual(audit.main(['audit','--domain','example.com','--no-live-scan']),0)
-            self.assertTrue(cmd.call_args.args[0].no_live_scan)
+    def test_removed_live_cli_options_fail_before_audit(self):
+        import contextlib
+        import io
+        for flags in (['--live-scan'], ['--no-live-scan'], ['--live-visibility','public']):
+            with self.subTest(flags=flags), patch.object(audit,'audit_cmd') as cmd:
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                    audit.main(['audit','--domain','example.com'] + flags)
+                self.assertEqual(error.exception.code,2)
+                cmd.assert_not_called()
 
 if __name__=='__main__':unittest.main()

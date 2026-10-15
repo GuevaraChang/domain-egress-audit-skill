@@ -7,7 +7,7 @@
 1. 进入 https://urlscan.io/user/signup/ 注册账号。
 2. 登录后进入 **Settings & API** 页面创建 API Key。
 3. 在终端运行 `python scripts/domain_audit.py setup`，或将 Key 主动提供给有本地权限的 Agent，由其使用 `set-key --name URLSCAN_API_KEY --stdin` 保存。
-4. 程序默认读取已有历史扫描，并在具备 Key、目标公网可达时默认提交一次 `https://域名/` 的 Private 远程扫描；若不希望第三方访问目标，执行 `audit --domain example.com --no-live-scan`。失败或额度不足在报告中标为未完成。
+4. 程序仅查询已有历史记录并读取详情；不会提交新扫描，历史为空不触发补扫。TLS 握手检测仍默认开启。
 
 官方文档：https://docs.urlscan.io/guides/quickstart
 
@@ -34,4 +34,4 @@ python scripts/domain_audit.py audit --domain example.com
 
 配置 `URLSCAN_API_KEY` 后，`audit` 默认先调用 `/api/v1/search/` 搜索已存在的记录，再用每条扫描的 UUID 调用 `/api/v1/result/{uuid}/` 读取扫描详情（默认最多 15 条；最多 50 条）。每条详细结果会消耗一次 Result API 配额；遇到 429 停止继续查询并报告“部分完成”，不要无限重试。
 
-远程实时扫描默认开启，仅在用户已配置 urlscan Key 且目标有公网 IP 时尝试提交。默认提交可见性为 `private`；如果服务商因额度或权限拒绝，应提示用户，不自动改为 Public。可使用 `--no-live-scan` 关闭，或显式通过 `--live-visibility public` 请求公开扫描。免费账户的历史搜索可能仅覆盖最近 90 天；历史记录为空不代表安全。官方文档：https://urlscan.io/docs/api/ 。
+实时网页扫描提交路径与相关 CLI 选项已移除。免费账户的历史搜索可能仅覆盖最近 90 天；历史记录为空不代表安全。官方文档：https://urlscan.io/docs/api/ 。
