@@ -26,7 +26,6 @@ class TestDomainAudit(unittest.TestCase):
         sources = {
             'rdap': audit.source('error', error='timeout'),
             'dns': audit.source('empty', data={'ips': []}),
-            'otx': audit.source('not_configured'),
             'urlscan': audit.source('not_configured'),
             'tls': audit.source('skipped'),
             'crtsh': audit.source('empty'),
@@ -36,25 +35,22 @@ class TestDomainAudit(unittest.TestCase):
         result = audit.evaluate(report)
         self.assertFalse(result['automatic_approval'])
         self.assertIn('证据不充分', result['risk_label'])
-        self.assertGreater(len(result['pending_items']), 3)
+        self.assertGreaterEqual(len(result['pending_items']), 3)
 
-    def test_otx_pulse_is_review_not_confirmed_malicious(self):
+    def test_urlscan_redirect_is_review_not_malicious_proof(self):
         sources = {
             'rdap': audit.source('ok', data={'age_days': 365}),
             'dns': audit.source('ok', data={'ips': [{'ip': '8.8.8.8', 'globally_routable': True}]}),
-            'otx': audit.source('ok', data={'pulse_count': 2}),
-            'urlscan': audit.source('empty'),
-            'tls': audit.source('skipped'),
-            'crtsh': audit.source('ok'),
-            'ripestat': audit.source('ok'),
+            'urlscan': audit.source('ok', data={'results':[{'redirected':'off-domain','task_url_host':'example.com','result_page_host':'other.example.net'}]}),
+            'tls': audit.source('skipped'), 'crtsh': audit.source('ok'), 'ripestat': audit.source('ok'),
         }
         result = audit.evaluate({'sources': sources, 'business_context': {}})
         self.assertIn('可疑', result['risk_label'])
-        self.assertEqual(result['findings'][0]['type'], 'otx_pulse')
+        self.assertIn('off_domain_redirect', [f['type'] for f in result['findings']])
         self.assertNotIn('高风险', result['risk_label'])
 
     def test_confirmed_malicious_manual_flag(self):
-        s = {k: audit.source('skipped') for k in ('rdap','dns','otx','urlscan','tls','crtsh','ripestat')}
+        s = {k: audit.source('skipped') for k in ('rdap','dns','urlscan','tls','crtsh','ripestat')}
         result = audit.evaluate({'sources': s, 'business_context': {'confirmed_malicious_evidence': True,'confirmed_malicious_evidence_reference': 'CASE-2026-001'}})
         self.assertIn('高风险', result['risk_label'])
         self.assertFalse(result['automatic_approval'])
@@ -78,7 +74,6 @@ class TestDomainAudit(unittest.TestCase):
              patch.object(audit, 'rdap_check', return_value=audit.source('ok', data={'age_days': 3650})), \
              patch.object(audit, 'ripestat_check', return_value=audit.source('ok', data={'results': []})), \
              patch.object(audit, 'crt_check', return_value=audit.source('ok', data={})), \
-             patch.object(audit, 'otx_check', return_value=audit.source('not_configured')), \
              patch.object(audit, 'urlscan_check', return_value=audit.source('not_configured')), \
              patch.object(audit, 'tls_check', return_value=audit.source('skipped')):
             report = audit.build_report('example.com', 'example.com', {}, env={})
@@ -111,7 +106,7 @@ class TestDomainAudit(unittest.TestCase):
         self.assertFalse(mock.call_args.kwargs['allow_redirects'])
 
     def test_report_markdown_contains_audit_sections(self):
-        sources = {k: audit.source('skipped') for k in ('rdap','dns','otx','urlscan','tls','crtsh','ripestat')}
+        sources = {k: audit.source('skipped') for k in ('rdap','dns','urlscan','tls','crtsh','ripestat')}
         sources['dns']['data'] = {'ips': [], 'records': {}}
         report = {'report_id': 'TEST', 'checked_at': audit.utc_now(), 'domain':'example.com',
                   'registered_domain': 'example.com', 'business_context': {}, 'sources': sources}
@@ -164,7 +159,7 @@ class TestDomainAudit(unittest.TestCase):
 
     def test_vt_detection_is_review_signal_not_confirmed_malicious(self):
         sources = {k: audit.source('skipped') for k in (
-            'rdap','dns','otx','urlscan','tls','crtsh','ripestat')}
+            'rdap','dns','urlscan','tls','crtsh','ripestat')}
         sources['dns']['data'] = {'ips': []}
         sources['virustotal'] = audit.source('ok', data={
             'last_analysis_stats': {'malicious': 2, 'suspicious': 1}})
@@ -203,7 +198,7 @@ class TestDomainAudit(unittest.TestCase):
             with patch.object(audit, 'DEFAULT_ENV', path), \
                  patch.object(audit.sys.stdin,'isatty',return_value=True), \
                  patch('builtins.input', side_effect=['y','1','n']), \
-                 patch.object(audit.getpass,'getpass',side_effect=['','', 'vt-secret']), \
+                 patch.object(audit.getpass,'getpass',side_effect=['', 'vt-secret']), \
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(audit.init_cmd(Namespace(non_interactive=False,force=False)),0)
             config=path.read_text(encoding='utf-8')
@@ -236,12 +231,12 @@ class TestDomainAudit(unittest.TestCase):
                 rc=audit.init_cmd(Namespace(non_interactive=False,force=False))
             contents=path.read_text(encoding='utf-8')
         self.assertEqual(rc,0)
-        self.assertEqual(hidden.call_count,2)
+        self.assertEqual(hidden.call_count,1)
         self.assertIn('ONBOARDING_DONE=yes',contents)
 
     def test_passive_asset_inventory_never_auto_expands_related_targets(self):
         src = {k: audit.source('skipped') for k in
-               ('rdap', 'dns', 'ripestat', 'crtsh', 'otx', 'urlscan', 'virustotal', 'tls')}
+               ('rdap', 'dns', 'ripestat', 'crtsh', 'urlscan', 'virustotal', 'tls')}
         src['dns'] = audit.source('ok', data={
             'records': {'A': ['8.8.8.8'], 'CNAME': ['cdn.vendor.net']},
             'ips': [{'ip': '8.8.8.8', 'globally_routable': True}]})
@@ -257,16 +252,16 @@ class TestDomainAudit(unittest.TestCase):
 
     def test_evidence_ledger_distinguishes_query_time_from_observed_time(self):
         src = {k: audit.source('skipped') for k in
-               ('rdap', 'dns', 'ripestat', 'crtsh', 'otx', 'urlscan', 'virustotal', 'tls')}
+               ('rdap', 'dns', 'ripestat', 'crtsh', 'urlscan', 'virustotal', 'tls')}
         src['urlscan'] = audit.source('ok', data={'results': [
             {'scan_time': '2020-01-01T00:00:00Z'}]})
         src['virustotal'] = audit.source('skipped', data={'skip_reason': 'commercial_use_restriction'})
         ledger, summary = audit.evidence_ledger({'sources': src})
-        self.assertEqual(ledger[5]['source'], 'urlscan')
-        self.assertEqual(ledger[5]['observed_at'], '2020-01-01T00:00:00Z')
-        self.assertGreater(ledger[5]['observation_age_days'], 90)
-        self.assertIsNone(ledger[6]['observed_at'])
-        self.assertEqual(summary['status_counts']['skipped'], 7)
+        self.assertEqual(ledger[4]['source'], 'urlscan')
+        self.assertEqual(ledger[4]['observed_at'], '2020-01-01T00:00:00Z')
+        self.assertGreater(ledger[4]['observation_age_days'], 90)
+        self.assertIsNone(ledger[5]['observed_at'])
+        self.assertEqual(summary['status_counts']['skipped'], 6)
         self.assertIn('urlscan', [x['source'] for x in summary['stale_observations_over_90_days']])
 
     def test_snapshot_diff_notes_changes_without_declaring_malicious(self):
@@ -306,152 +301,17 @@ class TestDomainAudit(unittest.TestCase):
              patch.object(audit, 'rdap_check', return_value=audit.source('empty')), \
              patch.object(audit, 'ripestat_check', return_value=audit.source('skipped')), \
              patch.object(audit, 'crt_check', return_value=audit.source('empty')), \
-             patch.object(audit, 'otx_check', return_value=audit.source('not_configured')), \
              patch.object(audit, 'urlscan_check', return_value=audit.source('not_configured')), \
              patch.object(audit, 'tls_check', return_value=audit.source('skipped')):
             report = audit.build_report('example.com', 'example.com', {'usage_type': 'business'}, env={})
-        self.assertEqual(report['schema_version'], '1.6.0')
-        self.assertEqual(len(report['evidence_ledger']), 13)
+        self.assertEqual(report['schema_version'], '1.8.0')
+        self.assertEqual(len(report['evidence_ledger']), 7)
         self.assertIn('cdn.vendor.com', [x['hostname'] for x in report['asset_inventory']])
         md = audit.render_markdown(report)
         self.assertIn('已检查与未检查', md)
         self.assertIn('发现的问题', md)
         self.assertEqual(report['sources']['virustotal']['status'], 'not_configured')
 
-
-    def test_domestic_manual_wrong_target_rejected(self):
-        import json
-        with tempfile.TemporaryDirectory() as d:
-            f=Path(d)/'domestic.json'
-            f.write_text(json.dumps({'target_fqdn':'other.com','reviews':{}}),encoding='utf-8')
-            with self.assertRaises(ValueError):
-                audit.load_domestic_evidence(f,'example.com')
-
-    def test_domestic_manual_provider_mismatch_and_missing_provenance(self):
-        import json
-        with tempfile.TemporaryDirectory() as d:
-            f=Path(d)/'domestic.json'
-            base={'target_fqdn':'example.com','reviews':{'qianxin_ti':{
-                'queried_fqdn':'fake.example.com','verdict':'malicious',
-                'checked_at':'2026-10-15T09:00:00+08:00','reviewer':'analyst','evidence_ref':'TICKET-1'}}}
-            f.write_text(json.dumps(base),encoding='utf-8')
-            with self.assertRaises(ValueError):
-                audit.load_domestic_evidence(f,'example.com')
-            base['reviews']['qianxin_ti']['queried_fqdn']='example.com'
-            base['reviews']['qianxin_ti']['evidence_ref']=''
-            f.write_text(json.dumps(base),encoding='utf-8')
-            with self.assertRaises(ValueError):
-                audit.load_domestic_evidence(f,'example.com')
-
-    def test_domestic_positive_signal_does_not_auto_approve_or_auto_confirm(self):
-        sources={key:audit.source('skipped') for key in (
-            'rdap','dns','ripestat','crtsh','otx','urlscan','virustotal','tls','threatbook_api')}
-        sources['dns']['data']={'ips':[]}
-        for key in audit.DOMESTIC_PORTALS:
-            sources[key+'_manual']=audit.domestic_manual_source(key,None)
-        sources['threatbook_x_manual']=audit.domestic_manual_source('threatbook_x',{
-            'queried_fqdn':'example.com','verdict':'malicious','checked_at':'2026-10-15T09:00:00+08:00',
-            'reviewer':'analyst','evidence_ref':'CASE-1','notes':'人工记录','exact_fqdn_match':True})
-        report={'sources':sources,'business_context':{}}
-        report['domestic_cross_validation']=audit.domestic_cross_validate(sources)
-        v=audit.evaluate(report)
-        self.assertIn('domestic_intel_hit',[x['type'] for x in v['findings']])
-        self.assertNotIn('高风险', v['risk_label'])
-        self.assertFalse(v['automatic_approval'])
-        self.assertEqual(report['domestic_cross_validation']['manual_hit_providers'],['threatbook_x'])
-
-    def test_domestic_disagreement_explicitly_flagged(self):
-        sources={key:audit.source('skipped') for key in ('threatbook_api',)}
-        for provider, verdict in [('threatbook_x','malicious'),('qianxin_ti','no_known_threat')]:
-            sources[provider+'_manual']=audit.domestic_manual_source(provider,{
-                'verdict':verdict,'queried_fqdn':'example.com','checked_at':'2026-10-15T09:00:00+08:00',
-                'reviewer':'analyst','evidence_ref':'CASE-'+provider, 'exact_fqdn_match':True})
-        cv=audit.domestic_cross_validate(sources)
-        self.assertEqual(cv['alignment'],'conflicting_sources_require_investigation')
-        self.assertEqual(cv['unique_vendor_count'],2)
-
-    def test_domestic_no_known_threat_not_safe_even_two_sources(self):
-        sources={key:audit.source('skipped') for key in (
-            'rdap','dns','ripestat','crtsh','otx','urlscan','virustotal','tls','threatbook_api')}
-        sources['dns']['data']={'ips':[]}
-        for key in audit.DOMESTIC_PORTALS:
-            rec={'queried_fqdn':'example.com','verdict':'no_known_threat',
-                 'checked_at':'2026-10-15T09:00:00+08:00','reviewer':'analyst',
-                 'evidence_ref':'CASE-'+key,'exact_fqdn_match':True}
-            sources[key+'_manual']=audit.domestic_manual_source(key,rec if key!='tencent_tix' else None)
-        report={'sources':sources,'business_context':{}}
-        cv=audit.domestic_cross_validate(sources)
-        self.assertEqual(cv['manual_checked_count'],2)
-        self.assertFalse(cv['manual_hit_providers'])
-        self.assertTrue(cv['needs_analyst_validation'])
-        self.assertFalse(audit.evaluate(report)['automatic_approval'])
-
-    def test_threatbook_no_permission_skips_without_request(self):
-        with patch.object(audit.requests,'post') as post:
-            result=audit.threatbook_check('example.com',{'THREATBOOK_API_KEY':'TEST-SHOULD-NOT-USE'})
-        self.assertEqual(result['status'],'skipped')
-        self.assertEqual(result['data']['api_called'],False)
-        post.assert_not_called()
-
-    def test_threatbook_permission_key_missing_no_network(self):
-        with patch.object(audit.requests,'post') as post:
-            result=audit.threatbook_check('example.com',{'THREATBOOK_API_AUTHORIZED':'yes'})
-        self.assertEqual(result['status'],'not_configured')
-        post.assert_not_called()
-
-    def test_threatbook_authorized_uses_post_body_and_separates_sources(self):
-        from unittest.mock import Mock
-        mock=Mock()
-        mock.status_code=200
-        mock.json.return_value={'response_code':0,'data':{'example.com':{
-            'judgments':['Malware'], 'samples':[], 'intelligences':{
-                'threatbook_lab':[{'source':'Labs','intel_types':['Malware'],'expired':False,
-                                   'find_time':'2026-10-12 10:00:00'}],
-                'open_source':[{'source':'alienvault.com','intel_types':['Malware'],'expired':False}]}}}}
-        with patch.object(audit.requests,'post',return_value=mock) as post:
-            result=audit.threatbook_check('example.com',{
-                'THREATBOOK_API_AUTHORIZED':'yes','THREATBOOK_API_KEY':'SECRET-TOKEN'})
-        self.assertEqual(result['status'],'ok')
-        args, kwargs=post.call_args
-        self.assertEqual(args[0],audit.THREATBOOK_API)
-        self.assertEqual(kwargs['data']['resource'],'example.com')
-        self.assertEqual(kwargs['data']['apikey'],'SECRET-TOKEN')
-        self.assertFalse(kwargs['allow_redirects'])
-        self.assertNotIn('SECRET-TOKEN',str(result))
-        self.assertEqual(len(result['data']['intelligences']),2)
-        self.assertEqual(result['data']['intelligences'][1]['category'],'open_source')
-
-    def test_threatbook_api_error_does_not_expose_api_key(self):
-        with patch.object(audit.requests,'post',side_effect=audit.requests.RequestException('SECRET-TOKEN')):
-            result=audit.threatbook_check('example.com',{
-                'THREATBOOK_API_AUTHORIZED':'yes','THREATBOOK_API_KEY':'SECRET-TOKEN'})
-        self.assertEqual(result['status'],'error')
-        self.assertNotIn('SECRET-TOKEN',str(result))
-
-    def test_domestic_evidence_valid_json_with_precise_fqdn(self):
-        import json
-        with tempfile.TemporaryDirectory() as d:
-            f=Path(d)/'domestic.json'
-            f.write_text(json.dumps({'target_fqdn':'example.com','reviews':{'threatbook_x':{
-                'queried_fqdn':'example.com','verdict':'suspicious',
-                'checked_at':'2026-10-15T09:00:00+08:00','reviewer':'analyst','evidence_ref':'CASE-1'}}}),encoding='utf-8')
-            results=audit.load_domestic_evidence(f,'example.com')
-        self.assertEqual(results['threatbook_x']['verdict'],'suspicious')
-        self.assertTrue(results['threatbook_x']['exact_fqdn_match'])
-
-    def test_full_report_new_domestic_sources_all_explicit(self):
-        f=audit.source('skipped',data={'ips':[], 'records':{}})
-        with patch.object(audit,'dns_check',return_value=f), patch.object(audit,'rdap_check',return_value=f), \
-             patch.object(audit,'ripestat_check',return_value=f), patch.object(audit,'crt_check',return_value=f), \
-             patch.object(audit,'otx_check',return_value=f), patch.object(audit,'urlscan_check',return_value=f), \
-             patch.object(audit,'tls_check',return_value=f):
-            rep=audit.build_report('example.com','example.com',{'usage_type':'business'},env={})
-        self.assertEqual(rep['sources']['threatbook_api']['status'],'skipped')
-        self.assertEqual(rep['sources']['qianxin_ti_manual']['status'],'not_configured')
-        self.assertEqual(len(rep['evidence_ledger']),13)
-        md=audit.render_markdown(rep)
-        self.assertIn('已检查与未检查',md)
-        self.assertFalse(rep['assessment']['automatic_approval'])
 
 
 if __name__ == '__main__':

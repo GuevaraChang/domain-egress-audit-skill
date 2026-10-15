@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light"><title>域名安全报告 · demo.example.org</title>
+<meta name="color-scheme" content="light"><title>域名安全报告 · example.com</title>
 <style>
 :root{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:#19283b;background:#f5f7fb}
 *{box-sizing:border-box}body{margin:0}main{max-width:880px;margin:40px auto;padding:0 20px 44px}
@@ -22,20 +22,35 @@ a{color:#1d5aa6}footer{font-size:12px;color:#586679;line-height:1.7;margin-top:2
 @media(max-width:660px){main{margin:18px auto;padding:0 12px 28px}.panel{padding:18px}.grid{grid-template-columns:1fr}.status{font-size:22px}h1{font-size:23px}}
 @media print{body{background:#fff}main{margin:0;max-width:none}.panel{break-inside:avoid}details:not([open]) pre{display:none}}
 </style></head><body><main>
-<header><h1>域名安全检查报告</h1><div class="sub">demo.example.org · 检查时间：2026-10-15T00:00:00+00:00</div></header>
+<header><h1>域名安全检查报告</h1><div class="sub">example.com · 检查时间：2026-10-15T00:00:00Z</div></header>
 <section class="panel hero unknown"><div class="small">检查结论</div><div class="status">信息不足，暂时无法判断</div>
-<p class="small">关键检查尚未完成：威胁情报。</p><p class="recommend">建议：建议先补齐下方未完成的检查，再决定是否访问或输入敏感信息。</p></section>
-<section class="panel"><h2>发现的问题</h2><article class="problem"><span class="problem-label">需要注意</span><p>示例：这个域名注册时间较短，请留意网站身份（合成演示数据）。</p></article></section>
-<section class="grid"><div class="panel"><h2>已经检查</h2><ul class="checklist"><li><span>DNS 解析</span><span class="state ok">已完成</span></li><li><span>域名注册信息</span><span class="state warn">发现线索</span></li><li><span>IP / 服务器归属</span><span class="state ok">已完成</span></li><li><span>网站证书历史</span><span class="state ok">已完成</span></li><li><span>开源安全名单</span><span class="state ok">已完成</span></li></ul></div>
-<div class="panel"><h2>未完成或未配置</h2><ul class="checklist"><li><span>OTX 威胁情报</span><span class="state mute">未配置</span></li><li><span>网站历史扫描</span><span class="state mute">未配置</span></li><li><span>VirusTotal 安全检测</span><span class="state mute">未配置</span></li><li><span>微步威胁情报</span><span class="state mute">未配置</span></li><li><span>HTTPS 连接测试</span><span class="state mute">未配置</span></li></ul></div></section>
-<section class="panel"><h2>技术详情（需要时再看）</h2><p class="small">点击展开即可查看原始证据，不需要阅读全部内容。</p><details><summary>DNS 解析 · 已完成</summary><p class="fine">解析已完成　</p><pre>{
-  &quot;A&quot;: [
-    &quot;203.0.113.10&quot;
-  ]
-}</pre></details><details><summary>域名注册信息 · 发现线索</summary><p class="fine">注册记录已读取　</p><pre>{
-  &quot;age_days&quot;: 24
-}</pre></details><details><summary>开源安全名单 · 已完成</summary><p class="fine">本地规则已加载　</p><pre>{
-  &quot;feeds&quot;: []
-}</pre></details><details><summary>OTX 威胁情报 · 未配置</summary><p class="fine">无说明　</p><pre>{}</pre></details><details><summary>网站历史扫描 · 未配置</summary><p class="fine">无说明　</p><pre>{}</pre></details><details><summary>网站证书历史 · 已完成</summary><p class="fine">无说明　</p><pre>{}</pre></details><details><summary>IP / 服务器归属 · 已完成</summary><p class="fine">无说明　</p><pre>{}</pre></details></section>
-<footer>报告编号：DEMO-ONLY。由公开信息及本地安全名单自动生成，只代表当前成功完成的检查；未查到不等于绝对安全。报告不主动批准、拦截或修改任何网络访问。</footer>
+<p class="small">关键检查尚未完成：VirusTotal 域名信誉。</p><p class="recommend">建议：建议先补齐下方未完成的检查，再决定是否访问或输入敏感信息。</p></section>
+<section class="panel"><h2>发现的问题</h2><p class="quiet">本次成功完成的检查中，没有发现明显风险线索。</p></section>
+<section class="grid"><div class="panel"><h2>已经检查</h2><ul class="checklist"><li><span>DNS 解析</span><span class="state ok">已完成</span></li><li><span>域名注册信息</span><span class="state ok">已完成</span></li><li><span>IP / 服务器归属</span><span class="state ok">已完成</span></li><li><span>网站证书历史</span><span class="state ok">已完成</span></li></ul></div>
+<div class="panel"><h2>未完成或未配置</h2><ul class="checklist"><li><span>网站历史扫描</span><span class="state mute">未配置</span></li><li><span>VirusTotal 安全检测</span><span class="state mute">未配置</span></li><li><span>HTTPS 连接测试</span><span class="state mute">未检查</span></li></ul></div></section>
+<section class="panel"><h2>技术详情（需要时再看）</h2><p class="small">点击展开即可查看原始证据，不需要阅读全部内容。</p><details><summary>DNS 解析 · 已完成</summary><p class="fine">示例：查询已完成　</p><pre>{
+  &quot;ips&quot;: [
+    {
+      &quot;ip&quot;: &quot;203.0.113.15&quot;,
+      &quot;globally_routable&quot;: true
+    }
+  ],
+  &quot;records&quot;: {
+    &quot;A&quot;: [
+      &quot;203.0.113.15&quot;
+    ],
+    &quot;AAAA&quot;: [],
+    &quot;CNAME&quot;: [],
+    &quot;NS&quot;: [
+      &quot;ns1.example.com&quot;
+    ]
+  }
+}</pre></details><details><summary>域名注册信息 · 已完成</summary><p class="fine">示例：已取得注册记录　</p><pre>{
+  &quot;age_days&quot;: 415,
+  &quot;registered_domain&quot;: &quot;example.com&quot;,
+  &quot;registrar&quot;: &quot;Example Registrar&quot;
+}</pre></details><details><summary>IP / 服务器归属 · 已完成</summary><p class="fine">示例：网络归属查询已完成　</p><pre>{
+  &quot;results&quot;: []
+}</pre></details><details><summary>网站证书历史 · 已完成</summary><p class="fine">示例：已查询证书历史　</p><pre>{}</pre></details><details><summary>网站历史扫描 · 未配置</summary><p class="fine">可配置 urlscan.io API Key 查询网页历史　</p><pre>{}</pre></details><details><summary>VirusTotal 安全检测 · 未配置</summary><p class="fine">可配置授权有效的 VirusTotal API Key 查询域名信誉　</p><pre>{}</pre></details><details><summary>HTTPS 连接测试 · 未检查</summary><p class="fine">默认不主动连接目标站点　</p><pre>{}</pre></details></section>
+<footer>报告编号：DEMO-NO-ACTUAL-SCAN。由公开数据源自动生成，只代表当前成功完成的检查；未查到不等于绝对安全。报告不主动批准、拦截或修改任何网络访问。</footer>
 </main></body></html>

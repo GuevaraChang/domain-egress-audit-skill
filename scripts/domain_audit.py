@@ -24,37 +24,21 @@ import dns.resolver
 import requests
 # 支持 importlib 按绝对路径加载 CLI（单元测试 / Agent 容器）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import local_ioc
 import report_html
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV = ROOT / '.env'
-UA = 'DomainEgressAuditSkill/1.6 (passive domain safety check)'
+UA = 'DomainSafetySkill/1.8 (read-only domain inspection)'
 TIMEOUT = 9
 RDAP_BOOTSTRAP = 'https://data.iana.org/rdap/dns.json'
-OTX_BASE = 'https://otx.alienvault.com/api/v1/indicators/domain'
 URLSCAN_SEARCH = 'https://urlscan.io/api/v1/search/'
 VT_DOMAIN_API = 'https://www.virustotal.com/api/v3/domains'
 VT_POLICY_URL = 'https://docs.virustotal.com/reference/public-vs-premium-api'
 VT_KEY_URL = 'https://www.virustotal.com/gui/my-apikey'
-THREATBOOK_API = 'https://api.threatbook.cn/v3/domain/query'
-DOMESTIC_PORTALS = {
-    'threatbook_x': ('微步在线 X 情报社区', 'https://x.threatbook.com/'),
-    'qianxin_ti': ('奇安信威胁情报中心', 'https://ti.qianxin.com/portal/'),
-    'tencent_tix': ('腾讯安全威胁情报中心', 'https://tix.qq.com/'),
-}
-DOMESTIC_VERDICTS = {'malicious', 'suspicious', 'no_known_threat', 'inconclusive'}
-DOMESTIC_LABELS = {
-    'malicious':'命中恶意情报（待人工验证）',
-    'suspicious':'存在可疑线索',
-    'no_known_threat':'当前未发现已知恶意（不等于安全）',
-    'inconclusive':'信息不足/无法定性',
-}
-
 RIPESTAT_API = 'https://stat.ripe.net/data/network-info/data.json'
 COMMON_SECOND_LEVEL_SUFFIXES = {'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn', 'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'org.au', 'co.jp', 'or.jp', 'ne.jp', 'com.hk', 'com.tw', 'com.sg', 'com.my', 'co.nz', 'com.br', 'co.kr'}
-CREDENTIAL_NAMES = ('OTX_API_KEY', 'URLSCAN_API_KEY', 'VT_API_KEY', 'THREATBOOK_API_KEY')
-CONFIG_NAMES = CREDENTIAL_NAMES + ('VT_USAGE', 'VT_API_TIER', 'THREATBOOK_API_AUTHORIZED', 'ONBOARDING_DONE')
+CREDENTIAL_NAMES = ('URLSCAN_API_KEY', 'VT_API_KEY')
+CONFIG_NAMES = CREDENTIAL_NAMES + ('VT_USAGE', 'VT_API_TIER', 'ONBOARDING_DONE')
 # VirusTotal Public API requires an explicit permitted-use acknowledgement.
 # Other configured providers are queried by default unless explicitly disabled.
 # Never disclose internal-only namespaces to Internet threat-intelligence services.
@@ -287,22 +271,6 @@ def crt_check(registered):
         return source('error', error=exc, url=url)
 
 
-def otx_check(host, api_key):
-    if not api_key:
-        return source('not_configured', summary='OTX API Key 未配置，可继续基础检查', url='https://otx.alienvault.com/api/')
-    url = f'{OTX_BASE}/{quote(host, safe="")}/general'
-    try:
-        raw = req_json(url, headers={'X-OTX-API-KEY': api_key})
-        pi = raw.get('pulse_info') or {}
-        pulses = pi.get('pulses') or []
-        count = pi.get('count', len(pulses))
-        return source('ok', summary='社区 Pulse 仅为调查线索，不能直接证明域名恶意',
-                      data={'pulse_count': count, 'pulse_examples': [{'name': p.get('name'),
-                            'id': p.get('id'), 'modified': p.get('modified')} for p in pulses[:8]]}, url=url)
-    except (requests.RequestException, ValueError, KeyError) as exc:
-        return source('error', error=exc, url=url)
-
-
 def urlscan_check(host, api_key):
     # Only searches PRE-EXISTING public scans; never submits scans or internal URLs.
     if not api_key:
@@ -328,178 +296,6 @@ def urlscan_check(host, api_key):
     except (requests.RequestException, ValueError, KeyError) as exc:
         return source('error', error=exc, url=URLSCAN_SEARCH)
 
-
-
-def threatbook_check(host, env):
-    """Optional Chinese TI API. Never consume uncertain/free domain quota or commercial rights.
-
-    Users must explicitly attest their account has this endpoint enabled AND their
-    organization permits this exact use. Default: zero network requests.
-    API key is sent only in HTTPS POST body, never in the report, URL or logging.
-    """
-    if str(env.get('THREATBOOK_API_AUTHORIZED', '')).strip().lower() != 'yes':
-        return source('skipped', summary='微步在线域名分析 API 未声明获得接口额度与机构用途授权；免费 X 网页人工核查仍可用',
-                      data={'skip_reason':'license_or_quota_not_confirmed','api_called':False},
-                      url='https://x.threatbook.com/apiDocs/start/confirm_api_permissions')
-    key = env.get('THREATBOOK_API_KEY', '').strip()
-    if not key:
-        return source('not_configured', summary='已确认使用许可但没有配置微步在线 API Key',
-                      data={'api_called':False}, url='https://x.threatbook.com/apiDocs/domain/query')
-    try:
-        # API 官方支持 POST/GET；选择 POST 以避免 apikey 出现在 URL/代理访问日志。
-        response = requests.post(THREATBOOK_API, data={'apikey':key,'resource':host,'lang':'zh'},
-                                 headers={'User-Agent':UA,'Accept':'application/json'},
-                                 timeout=TIMEOUT, allow_redirects=False)
-        if 300 <= response.status_code < 400:
-            raise ValueError('接口重定向已拒绝，防止凭据泄露')
-        response.raise_for_status()
-        raw = response.json()
-        if raw.get('response_code') != 0:
-            # Do not echo raw error messages; they may include request values.
-            raise ValueError('接口业务响应失败或权限/配额不足：response_code=' + str(raw.get('response_code'))[:15])
-        domain_result = (raw.get('data') or {}).get(host)
-        if not isinstance(domain_result, dict):
-            raise ValueError('正常响应中缺少目标 FQDN 对应情报')
-        judgments = domain_result.get('judgments') or []
-        if not isinstance(judgments, list):
-            judgments = []
-        ioc = domain_result.get('intelligences') or {}
-        evidence = []
-        for bucket in ('threatbook_lab','x_reward','open_source'):
-            for row in (ioc.get(bucket) or [])[:12]:
-                if not isinstance(row, dict):
-                    continue
-                evidence.append({'category':bucket,'source':str(row.get('source') or '')[:80],
-                                 'intel_types':list(row.get('intel_types') or [])[:10],
-                                 'expired':row.get('expired'),
-                                 'confidence':row.get('confidence'),
-                                 'observed_at':row.get('find_time'), 'updated_at':row.get('update_time')})
-        return source('ok', summary='微步在线域名情报返回；区分实验室/奖励计划/开源转载，结果须人工核实',
-            data={'api_called':True,'target_domain':host,'judgments':[str(x)[:60] for x in judgments[:20]],
-                  'intelligences':evidence[:25],
-                  'sample_count':len(domain_result.get('samples') or []),
-                  'source_independence_note':'open_source 可能转载 OTX 等情报，不得作为独立第二家佐证'},
-            url='https://x.threatbook.com/')
-    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-        # Suppress external text; avoid accidentally serializing request's apikey.
-        return source('error', summary='微步 API 查询未成功，不得计为零命中',
-                      data={'api_called':True,'error_type':type(exc).__name__},
-                      url='https://x.threatbook.com/apiDocs/domain/query')
-
-
-def load_domestic_evidence(path, host):
-    """Read an explicitly provided *local* analyst review, not scraped platform results.
-
-    The evidence has to match the exact FQDN. Claim of a threat never becomes
-    confirmed malicious automatically; even two hits require review.
-    """
-    if not path:
-        return {}
-    obj = json.loads(Path(path).expanduser().read_text(encoding='utf-8'))
-    if not isinstance(obj, dict) or validated_domain(str(obj.get('target_fqdn','')))[0] != host:
-        raise ValueError('国内情报人工核查记录中的 target_fqdn 必须与审查目标完全一致')
-    reviews = obj.get('reviews') or {}
-    if not isinstance(reviews, dict):
-        raise ValueError('reviews 必须是以平台代码为键的 JSON 对象')
-    unexpected = set(reviews) - set(DOMESTIC_PORTALS)
-    if unexpected:
-        raise ValueError('未知国内情报平台代码：'+', '.join(sorted(unexpected)))
-    parsed = {}
-    for provider, row in reviews.items():
-        if not isinstance(row, dict):
-            raise ValueError(provider + ' 必须是 JSON 对象')
-        verdict = str(row.get('verdict') or '').strip().lower()
-        if verdict not in DOMESTIC_VERDICTS:
-            raise ValueError(provider + ' 的 verdict 不受支持：'+verdict)
-        fqdn = validated_domain(str(row.get('queried_fqdn') or ''))[0]
-        if fqdn != host:
-            raise ValueError(provider + ' 的 queried_fqdn 不匹配当前申请 FQDN')
-        checked = row.get('checked_at')
-        if not parse_iso(checked):
-            raise ValueError(provider + ' 必须提供真实 checked_at（ISO 8601），不可把采集时间冒充观测时间')
-        reviewer = str(row.get('reviewer') or '').strip()
-        ref = str(row.get('evidence_ref') or '').strip()
-        if not reviewer or not ref:
-            raise ValueError(provider + ' 必须填 reviewer 与截图/工单 evidence_ref，避免无依据自报无风险')
-        parsed[provider] = {
-            'verdict':verdict, 'queried_fqdn':host, 'checked_at':checked,
-            'reviewer':reviewer[:100], 'evidence_ref':ref[:220],
-            'notes':str(row.get('notes') or '')[:350],
-            'exact_fqdn_match':True, 'manually_supplied':True,
-        }
-    return parsed
-
-
-def domestic_manual_source(key, record):
-    title, url = DOMESTIC_PORTALS[key]
-    if not record:
-        return source('not_configured', summary=f'{title}：未导入人工核查证据（不是零命中）',
-                      data={'manual_only':True}, url=url)
-    return source('ok', summary=f'本地人工提供的网页复核结果：{DOMESTIC_LABELS[record["verdict"]]}（未由脚本验证网页真伪）',
-                  data=record, url=url)
-
-
-def domestic_cross_validate(src):
-    """Separate sources, not votes. Avoid multiplying mirrors of a single IOC feed."""
-    matrix = []
-    threat_sources = []
-    for key in DOMESTIC_PORTALS:
-        row = src.get(key+'_manual') or {}
-        info = row.get('data') or {}
-        verdict = info.get('verdict') if row.get('status') == 'ok' else None
-        matrix.append({'provider':key,'name':DOMESTIC_PORTALS[key][0],
-                       'mode':'manual_review','status':row.get('status','not_configured'),
-                       'verdict':verdict,'label':DOMESTIC_LABELS.get(verdict,'未取得'),
-                       'checked_at':info.get('checked_at'), 'evidence_ref':info.get('evidence_ref'),
-                       'exact_fqdn_match':info.get('exact_fqdn_match',False)})
-        if verdict in ('malicious','suspicious'):
-            threat_sources.append(key)
-    t = src.get('threatbook_api') or {}
-    td = t.get('data') or {}
-    matrix.append({'provider':'threatbook_api','name':'微步在线域名分析 API',
-                   'mode':'authorized_api','status':t.get('status','skipped'),
-                   'verdict':'unreviewed_indicators' if t.get('status')=='ok' else None,
-                   'label':'原始标签/情报待复核' if t.get('status')=='ok' else '未取得',
-                   'judgments':td.get('judgments',[])})
-    # 本地静态 feed 与人工厂商结论属于不同层次，不能凑成“两家厂商”。
-    loc = (src.get('local_ioc') or {}).get('data') or {}
-    local_groups = set()
-    for feed in loc.get('feeds', []):
-        relevant = [m for m in loc.get('matched', []) if m['feed'] == feed['feed']]
-        fresh_hits = [m for m in relevant if not m.get('stale')]
-        if fresh_hits and feed.get('kind') == 'phishing_domain':
-            local_groups.add(feed.get('origin_group'))
-        matrix.append({'provider':feed['feed'], 'name':feed['title'], 'mode':'offline_feed',
-                       'status':'stale' if feed['stale'] else 'ok',
-                       'verdict':'candidate' if fresh_hits else None,
-                       'label':('精确域名疑似钓鱼线索' if feed['kind'] == 'phishing_domain' else
-                                '仅解析 IP 弱关联' if feed['kind'] == 'attacking_ip' else
-                                '广告/跟踪名单，非恶意证据') if fresh_hits else '本地缓存未命中（不等于安全）',
-                       'checked_at':feed['updated_at'], 'evidence_ref':feed['project'],
-                       'origin_group':feed.get('origin_group'), 'fresh_hit_count':len(fresh_hits),
-                       'correlation_only':True})
-    manual_checked = [x for x in matrix if x['mode']=='manual_review' and x['status']=='ok']
-    negatives = [x['provider'] for x in manual_checked if x['verdict']=='no_known_threat']
-    if threat_sources and negatives:
-        alignment = 'conflicting_sources_require_investigation'
-    elif len(threat_sources) >= 2:
-        alignment = 'multiple_vendor_alerts_verify_common_upstream'
-    elif threat_sources:
-        alignment = 'single_vendor_alert_requires_review'
-    elif len(manual_checked) >= 2:
-        alignment = 'no_known_hits_not_proven_safe'
-    else:
-        alignment = 'insufficient_domestic_coverage'
-    # Vendor-level unique coverage; the same provider's webpage and API are not two votes.
-    checked_providers = {x['provider'] for x in manual_checked}
-    if t.get('status') == 'ok':
-        checked_providers.add('threatbook_x')
-    return {'matrix':matrix, 'manual_hit_providers':threat_sources,
-            'manual_checked_count':len(manual_checked),
-            'unique_vendor_count':len(checked_providers), 'alignment':alignment,
-            'needs_analyst_validation':True, 'local_security_origin_groups': sorted(local_groups),
-            'methodology':'各平台可转载相同 IOC，不能把 2 家命中等同独立确认；仅精确 FQDN、原始证据、时效核验后由安全人员定性。',
-            'api_rights_notice':'微步 API 仅账号实际授予域名接口额度且机构用途已获许可时调用，默认跳过。'}
 
 
 def effective_vt_usage(env, ctx=None):
@@ -629,15 +425,9 @@ def evidence_ledger(report):
         'dns': ('运行机当前 DNS', '当前机器解析器视角，非公网权威全景', None),
         'ripestat': ('RIPEstat', '路由归属信息：非安全信誉分数', None),
         'crtsh': ('crt.sh / CT', '历史证书记录：不等于实时 TLS 有效性', 'latest_entry'),
-        'otx': ('OTX', '社区 Pulse，仅为可疑关联线索', None),
         'urlscan': ('urlscan', '公开历史扫描，可能过时/样本有偏', 'latest_scan'),
         'virustotal': ('VirusTotal', '第三方检测统计，不等于恶意定性；某些用途自动跳过', 'last_analysis_date'),
         'tls': ('可选 TLS 探测', '仅在明确授权时可做的实时目标连接', None),
-        'threatbook_api': ('微步域名情报 API', '仅在确认接口额度/机构授权后使用；含来源转载；不是恶意证明', None),
-        'threatbook_x_manual': ('微步 X 人工网页', '用户提供截图/工单；非程序自动验证；不得与微步 API 算两家独立平台', 'checked_at'),
-        'qianxin_ti_manual': ('奇安信人工网页', '用户提供截图/工单；非程序自动验证', 'checked_at'),
-        'tencent_tix_manual': ('腾讯威胁情报人工网页', '用户提供截图/工单；不保证全部查询功能免费', 'checked_at'),
-        'local_ioc': ('中国开源本地 IOC 规则库', '本地离线精确域名匹配/解析 IP 弱关联；广告名单不是恶意定性', None),
     }
     ledger = []
     status_counts = {k: 0 for k in ('ok', 'empty', 'error', 'not_configured', 'skipped')}
@@ -646,8 +436,6 @@ def evidence_ledger(report):
         title, meaning, time_key = semantics.get(key, (key, '未分类证据', None))
         record = item.get('data') or {}
         observed = record.get(time_key) if time_key else None
-        if key.endswith('_manual'):
-            observed = record.get('checked_at')
         if key == 'urlscan':
             observed = max((r.get('scan_time') for r in record.get('results', []) if r.get('scan_time')), default=None)
         # Observed time is NULL rather than dishonestly substituting collection time.
@@ -715,7 +503,7 @@ def attach_baseline(report, previous):
             report['assessment']['pending_items'] + ['历史快照差异待人工确认（DNS/注册信息变化）']))
         report['assessment']['findings'].append({
             'severity': 'medium', 'type': 'baseline_change', 'confidence': 'high',
-            'evidence_ids': ['EV-02', 'EV-01'],
+            'evidence_ids': [e['id'] for e in report.get('evidence_ledger', []) if e.get('source') in ('dns','rdap')],
             'detail': f"与基线相比有 {len(comparison['changes'])} 项变化；仅为待核查信号，不是恶意证据。"})
         report['assessment']['risk_label'] = '存在风险信号，需人工调查'
         report['assessment']['decision'] = '检测到历史变化，建议核实后再访问'
@@ -726,6 +514,9 @@ def attach_baseline(report, previous):
 def evaluate(report):
     src = report['sources']
     ctx = report['business_context']
+    ev = {row['source']:row['id'] for row in report.get('evidence_ledger', [])}
+    def ids(*names):
+        return [ev[name] for name in names if name in ev]
     findings = []
     pending = []
     high_confidence = False
@@ -735,9 +526,9 @@ def evaluate(report):
         if isinstance(age, int) and age < 0:
             findings.append({'severity': 'medium', 'type': 'rdap', 'detail': 'RDAP 创建时间晚于当前时间；需核验时钟或注册数据'})
         elif isinstance(age, int) and age < 30:
-            findings.append({'severity': 'medium', 'type': 'new_domain', 'confidence': 'medium', 'evidence_ids': ['EV-01'], 'detail': f'域名注册仅 {age} 天，建议加强主体核验'})
+            findings.append({'severity': 'medium', 'type': 'new_domain', 'confidence': 'medium', 'evidence_ids': ids('rdap'), 'detail': f'域名注册仅 {age} 天，建议加强主体核验'})
         elif isinstance(age, int) and age < 90:
-            findings.append({'severity': 'low', 'type': 'young_domain', 'confidence': 'medium', 'evidence_ids': ['EV-01'], 'detail': f'域名注册约 {age} 天，建议关注业务匹配性'})
+            findings.append({'severity': 'low', 'type': 'young_domain', 'confidence': 'medium', 'evidence_ids': ids('rdap'), 'detail': f'域名注册约 {age} 天，建议关注业务匹配性'})
     else:
         pending.append('RDAP 注册信息未成功获取')
     dns_data = src['dns']['data']
@@ -745,23 +536,17 @@ def evaluate(report):
     if src['dns']['status'] == 'error' or not ips:
         pending.append('DNS A/AAAA 地址未成功取得；应确认确切目标 FQDN 和当前解析状态')
     if any(not x['globally_routable'] for x in ips):
-        findings.append({'severity': 'medium', 'type': 'non_public_ip', 'confidence': 'high', 'evidence_ids': ['EV-02'], 'detail': '外部域名解析结果出现非公网地址，需排查分视图、私有解析或污染'})
+        findings.append({'severity': 'medium', 'type': 'non_public_ip', 'confidence': 'high', 'evidence_ids': ids('dns'), 'detail': '外部域名解析结果出现非公网地址，需排查分视图、私有解析或污染'})
     vt = src.get('virustotal', source('skipped', summary='旧版报告未包含 VirusTotal'))
     if vt['status'] == 'ok':
         stats = vt['data'].get('last_analysis_stats') or {}
         malicious, suspicious = stats.get('malicious', 0), stats.get('suspicious', 0)
         if malicious or suspicious:
-            findings.append({'severity': 'medium', 'type': 'virustotal_detection', 'confidence': 'medium', 'evidence_ids': ['EV-07'],
+            findings.append({'severity': 'medium', 'type': 'virustotal_detection', 'confidence': 'medium', 'evidence_ids': ids('virustotal'),
                              'detail': f'VirusTotal 既有分析中 malicious={malicious}, suspicious={suspicious}；需核实具体引擎和时效，不能直接判定恶意'})
     elif vt['status'] in ('not_configured', 'error') and ctx.get('manual_threat_review_completed') is not True:
         pending.append('VirusTotal 数据不可用')
     # vt.status=skipped 且因为某些用途限制时，是合规跳过而不是技术无风险。
-    otx = src['otx']
-    if otx['status'] == 'ok' and (otx['data'].get('pulse_count') or 0) > 0:
-        findings.append({'severity': 'medium', 'type': 'otx_pulse', 'confidence': 'low', 'evidence_ids': ['EV-05'],
-                         'detail': f"OTX 存在 {otx['data']['pulse_count']} 条关联 Pulse，仅为社区关联线索，需要人工判定相关性与时效"})
-    if otx['status'] in ('not_configured', 'error') and ctx.get('manual_threat_review_completed') is not True:
-        pending.append('OTX 情报未查询到')
     us = src['urlscan']
     if us['status'] == 'ok':
         redirects = [x for x in us['data'].get('results', [])
@@ -769,64 +554,13 @@ def evaluate(report):
                      or (x.get('result_page_host') and x.get('task_url_host')
                          and x['result_page_host'].lower() != x['task_url_host'].lower())]
         if redirects:
-            findings.append({'severity': 'medium', 'type': 'off_domain_redirect', 'confidence': 'low', 'evidence_ids': ['EV-06'],
+            findings.append({'severity': 'medium', 'type': 'off_domain_redirect', 'confidence': 'low', 'evidence_ids': ids('urlscan'),
                              'detail': f'urlscan 历史记录中有 {len(redirects)} 条跨域跳转，需要判断跳转目标是否属于批准业务'})
     elif us['status'] in ('not_configured', 'error') and ctx.get('manual_threat_review_completed') is not True:
         pending.append('urlscan 历史数据未查询到')
-    # 国内平台的人工情报不是机器校验；命中优先人工核实原始 IOC，不能直接凭命中数判定恶意。
-    cn = report.get('domestic_cross_validation') or domestic_cross_validate(src)
-    if cn.get('unique_vendor_count',0) < 2 and ctx.get('domestic_intel_review_waived') is not True:
-        pending.append('国内情报覆盖有限；已使用可自动查询的数据源，未查询到的平台不计为安全')
-    if cn.get('alignment') == 'conflicting_sources_require_investigation':
-        pending.append('国内情报结论冲突：逐条对照原始 IOC、标签生效时间和数据来源')
-    if cn['manual_hit_providers']:
-        findings.append({'severity':'medium','type':'domestic_intel_hit',
-                         'confidence':'manual_unverified',
-                         'evidence_ids':[f'EV-{9+list(DOMESTIC_PORTALS).index(k)+1:02d}' for k in cn['manual_hit_providers']],
-                         'detail':'国内平台人工记录存在恶意/可疑线索：' + ', '.join(cn['manual_hit_providers']) +
-                                  '；需复核原始证据、是否精确命中 FQDN，以及来源独立性'})
-        pending.append('国内情报有命中：需安全人员核实原始证据与来源独立性')
-    tb = src.get('threatbook_api') or {}
-    if tb.get('status') == 'ok':
-        d = tb.get('data') or {}
-        # Labels do not all mean malicious (e.g. Whitelist or ICP); avoid naive positive-match rules.
-        benign = {'whitelist','icp','unknown','other'}
-        live = [e for e in d.get('intelligences',[]) if e.get('expired') is False
-                and e.get('category') in ('threatbook_lab','x_reward')
-                and any(str(x).lower() not in benign for x in e.get('intel_types',[]))]
-        if live:
-            findings.append({'severity':'medium','type':'threatbook_intel_signal',
-                'confidence':'source_claim_requires_review','evidence_ids':['EV-09'],
-                'detail':f'微步原生/奖励情报有 {len(live)} 条未过期的非白名单类型记录；需核验类别与原始证据'})
-            pending.append('微步 API 威胁标签需人工确认（区分原生与转载情报）')
-    # 本地缓存中每个命中都记录来源；禁止把广告名单或共享 IP 自动定性恶意。
-    local = src.get('local_ioc') or {}
-    local_data = local.get('data') or {}
-    local_ledger_id = next((e['id'] for e in report.get('evidence_ledger', []) if e.get('source') == 'local_ioc'), None)
-    if local.get('status') != 'ok':
-        pending.append('本地安全名单暂时无法使用')
-    else:
-        if any(f.get('stale') for f in local_data.get('feeds', [])):
-            pending.append('本地 IOC 规则存在过期源（默认超过 7 天）：先更新并复核旧数据命中')
-        active_matches = [m for m in local_data.get('matched', []) if not m.get('stale')]
-        for kind, code, sev, confidence, description in [
-            ('phishing_domain', 'local_phishing_ioc', 'medium', 'medium', '钓鱼域名社区名单精确 FQDN 命中'),
-            ('attacking_ip', 'local_ip_association', 'medium', 'low', '解析 IP 在社区攻击来源名单中出现（CDN/共享 IP 弱关联）'),
-            ('ad_tracking', 'local_adtracking', 'low', 'context_only', '域名出现在广告/追踪过滤表，不能解释为恶意域名')
-        ]:
-            relevant = [m for m in active_matches if m['kind'] == kind]
-            if relevant:
-                findings.append({'severity':sev,'type':code,'confidence':confidence,
-                                 'evidence_ids':[local_ledger_id] if local_ledger_id else [],
-                                 'detail': description + '：' + ', '.join(m['feed'] + ' [' + m['indicator'] + ']' for m in relevant[:5]) + '；必须人工复核源证据及误报'})
-                if sev == 'medium':
-                    pending.append('本地 IOC 发现待核查线索：核实是否为真实攻击资产、是否仍有效及是否共享服务')
-        stale_matches = [m for m in local_data.get('matched', []) if m.get('stale')]
-        if stale_matches:
-            pending.append('本地 IOC 历史过期缓存曾命中，需更新验证；不把过期名单当作实时恶意情报')
     tls = src['tls']
     if tls['status'] == 'error':
-        findings.append({'severity': 'medium', 'type': 'tls_probe_failed', 'confidence': 'high', 'evidence_ids': ['EV-08'],
+        findings.append({'severity': 'medium', 'type': 'tls_probe_failed', 'confidence': 'high', 'evidence_ids': ids('tls'),
                          'detail': '主动 TLS 校验失败或不完整，可能是证书问题、端口不通或网络策略导致；需核实'})
     if tls['status'] == 'skipped' and ctx.get('tls_review_completed') is not True:
         pass  # 无主动连接权限时，TLS 探测属于可选能力
@@ -864,12 +598,11 @@ def evaluate(report):
 def technical_assessment(report):
     """Deterministic machine summary; does not pretend to approve egress."""
     src = report['sources']
-    checks = ('rdap', 'dns', 'ripestat', 'crtsh', 'otx', 'urlscan', 'local_ioc',
-              'threatbook_api', 'virustotal')
+    checks = ('rdap', 'dns', 'ripestat', 'crtsh', 'urlscan', 'virustotal', 'tls')
     states = {k: (src.get(k) or {}).get('status', 'not_available') for k in checks}
     positive = [f for f in report['assessment']['findings']
                 if f.get('severity') in ('high', 'medium') and f.get('type') not in ('data_egress',)]
-    core = ('rdap', 'dns', 'ripestat', 'crtsh', 'local_ioc')
+    core = ('rdap', 'dns', 'ripestat', 'crtsh')
     coverage = all(states[k] in ('ok', 'empty') for k in core)
     if positive:
         verdict = 'review_signals_detected'
@@ -887,29 +620,8 @@ def technical_assessment(report):
         'signal_types': sorted({f.get('type') for f in positive}),
         'business_data_risk': 'not_assessed' if report['business_context'].get('context_status') == 'not_provided' else 'provided_information_only',
         'access_authorization': 'not_granted', 'automatic_approval': False,
-        'limitations': '公开情报和已加载 IOC 的自动判断；业务必要性、数据分类、真实归属和授权控制不能仅靠公网域名信息证明。',
+        'limitations': '公开情报的自动判断；业务必要性、数据分类、真实归属和授权控制不能仅靠公网域名信息证明。',
     }
-
-
-def auto_refresh_local_ioc(db, max_age_days=7):
-    """Update approved default feeds only when missing/stale, without target disclosure."""
-    now = datetime.now(timezone.utc)
-    rows = {r['feed']: r for r in local_ioc.list_feeds(db=db)}
-    due = []
-    for name, cfg in local_ioc.FEEDS.items():
-        if not cfg['enabled_by_default']:
-            continue
-        row = rows.get(name)
-        updated = parse_iso(row.get('updated_at')) if row else None
-        if not updated or (now - updated).total_seconds() >= max_age_days * 86400:
-            due.append(name)
-    if not due:
-        return {'status': 'fresh_cache', 'checked_at': utc_now(), 'refreshed': [], 'errors': {}, 'target_sent': False}
-    outcome = local_ioc.update_feeds(db=db, names=due)
-    errors = {k: v.get('error', '未知失败') for k, v in outcome.items() if v.get('status') != 'ok'}
-    return {'status': 'partial' if errors else 'updated', 'checked_at': utc_now(),
-            'refreshed': [k for k,v in outcome.items() if v.get('status') == 'ok'],
-            'attempted': due, 'errors': errors, 'target_sent': False}
 
 
 def locate_baseline(output_dir, host):
@@ -953,7 +665,7 @@ def render_markdown(report):
     return '\n'.join(lines) + '\n'
 
 
-def build_report(host, registered, ctx, tls_probe=False, env=None, domestic_reviews=None, ioc_db=None):
+def build_report(host, registered, ctx, tls_probe=False, env=None):
     env = env if env is not None else read_env()
     d = dns_check(host, registered)
     r = rdap_check(registered)
@@ -961,24 +673,18 @@ def build_report(host, registered, ctx, tls_probe=False, env=None, domestic_revi
     vt_usage = effective_vt_usage(env, ctx)
     sources = {
         'rdap': r, 'dns': d, 'ripestat': ripestat_check(ips),
-        'crtsh': crt_check(registered), 'otx': otx_check(host, env.get('OTX_API_KEY', '')),
+        'crtsh': crt_check(registered),
         'urlscan': urlscan_check(host, env.get('URLSCAN_API_KEY', '')),
         'virustotal': vt_check(host, env.get('VT_API_KEY', ''), vt_usage),
         'tls': tls_check(host, int(ctx.get('target_port') or 443), ips, tls_probe),
-        'threatbook_api': threatbook_check(host, env),
-        **{key+'_manual':domestic_manual_source(key,(domestic_reviews or {}).get(key))
-           for key in DOMESTIC_PORTALS},
-        'local_ioc': local_ioc.inspect_cached(host, [x['ip'] for x in ips if x.get('globally_routable')],
-                                              db=ioc_db or local_ioc.DEFAULT_DB),
     }
     instant = datetime.now(timezone.utc)
-    report = {'schema_version': '1.6.0',
+    report = {'schema_version': '1.8.0',
               'report_id': 'EDA-' + instant.strftime('%Y%m%dT%H%M%SZ') + '-' + re.sub(r'[^a-z0-9]+', '-', host)[:48],
               'checked_at': instant.isoformat(timespec='seconds'), 'domain': host,
               'registered_domain': registered, 'vt_usage': vt_usage,
               'business_context': ctx, 'sources': sources,
               'assessment': {}}
-    report['domestic_cross_validation'] = domestic_cross_validate(sources)
     report['evidence_ledger'], report['evidence_coverage'] = evidence_ledger(report)
     report['asset_inventory'] = build_asset_inventory(report)
     report['assessment'] = evaluate(report)
@@ -1012,14 +718,12 @@ def write_local_env(env, path=None):
 def init_cmd(args):
     """Step-by-step key setup. Called automatically by audit on first TTY run."""
     print('\n=== 免费 API 配置向导 ===')
-    print('无需 API Key：DNS、RDAP、IP 归属、证书记录、本地安全名单。')
-    print('需要免费账号：AlienVault OTX、urlscan.io。完成一次配置后，以后自动查询。')
+    print('无需 API Key：DNS、RDAP、IP 归属、证书历史。')
+    print('可选账号：urlscan.io、VirusTotal。获得相应 API Key 后可自动查询。')
     print('密钥只保存于本机 .env，不会显示在屏幕上，也不会写入报告。')
     env = read_env()
     interactive = sys.stdin.isatty() and not args.non_interactive
     providers = [
-      ('OTX_API_KEY', 'AlienVault OTX', 'https://otx.alienvault.com/',
-       '登录后从账户 Settings / API Key 页面复制 Key。'),
       ('URLSCAN_API_KEY', 'urlscan.io', 'https://urlscan.io/user/signup/',
        '注册并进入 Settings & API → New API Key；用于查询已有的公开扫描记录。'),
     ]
@@ -1039,9 +743,9 @@ def init_cmd(args):
     print('该服务的免费 API 有使用范围限制；仅在你确认符合官方条款后启用。')
     print('详情：' + VT_POLICY_URL)
     if interactive and (args.force or not env.get('VT_API_KEY')):
-        enable = input('你已确认可使用该 API（个人非某些用途免费额度或已获许可的订阅）？[y/N]：').strip().lower()
+        enable = input('你已确认可使用该 API（个人非商业免费 API 或已获许可的订阅）？[y/N]：').strip().lower()
         if enable == 'y':
-            tier = input('使用的授权类型：[1] 个人非某些用途免费 [2] 已获许可的订阅，默认 1：').strip()
+            tier = input('使用的授权类型：[1] 个人非商业免费 API [2] 已获许可的订阅，默认 1：').strip()
             value = getpass.getpass('VirusTotal API Key（输入不回显）：').strip()
             if value:
                 env['VT_API_KEY'] = value
@@ -1051,15 +755,6 @@ def init_cmd(args):
                 else:
                     env['VT_USAGE'] = 'noncommercial'
                     env.pop('VT_API_TIER', None)
-    print('\n【微步在线（可选）】https://x.threatbook.com/')
-    print('域名分析 API 是否免费及可用取决于账户权限；已有接口授权及额度时才能启用。')
-    if interactive and (args.force or not env.get('THREATBOOK_API_KEY')):
-        enable = input('已从平台获得域名分析 API 调用权限？[y/N]：').strip().lower()
-        if enable == 'y':
-            key = getpass.getpass('微步 API Key（输入不回显）：').strip()
-            if key:
-                env['THREATBOOK_API_KEY'] = key
-                env['THREATBOOK_API_AUTHORIZED'] = 'yes'
     env['ONBOARDING_DONE'] = 'yes' if interactive else env.get('ONBOARDING_DONE', 'no')
     write_local_env(env)
     print('\n配置已保存到本机：' + str(DEFAULT_ENV))
@@ -1067,14 +762,42 @@ def init_cmd(args):
     return 0
 
 
+def set_key_cmd(args):
+    """Configure a user-supplied API key safely from stdin (Agent) or hidden TTY input.
+
+    Do not include secret bytes in shell arguments, transcripts, logs, reports, or source files.
+    """
+    if args.name not in CREDENTIAL_NAMES:
+        raise ValueError('不支持该 API Key 配置项')
+    if args.stdin:
+        value = sys.stdin.readline().strip()
+    elif sys.stdin.isatty():
+        value = getpass.getpass(f'{args.name}（隐藏输入）：').strip()
+    else:
+        raise ValueError('非交互模式请使用 --stdin 从标准输入安全读取 Key')
+    if not value or len(value) > 4096 or any(c in value for c in '\n\r\x00'):
+        raise ValueError('API Key 为空或格式异常')
+    env = read_env()
+    env[args.name] = value
+    if args.name == 'VT_API_KEY' and args.vt_tier:
+        if args.vt_tier == 'premium':
+            env['VT_API_TIER'] = 'premium'
+            env.pop('VT_USAGE', None)
+        else:
+            env['VT_USAGE'] = 'noncommercial'
+            env.pop('VT_API_TIER', None)
+    env['ONBOARDING_DONE'] = 'yes'
+    write_local_env(env)
+    print(f'{args.name} 已保存到本地私有配置文件（不会显示密钥）。')
+    return 0
+
+
 def doctor_cmd(args):
     env = read_env()
     print('=== API 配置检查 ===')
-    for key, label in [('OTX_API_KEY', 'OTX'), ('URLSCAN_API_KEY', 'urlscan'),
-                       ('VT_API_KEY', 'VirusTotal'), ('THREATBOOK_API_KEY', '微步在线')]:
+    for key, label in [('URLSCAN_API_KEY', 'urlscan'),
+                       ('VT_API_KEY', 'VirusTotal')]:
         eligible = key != 'VT_API_KEY' or effective_vt_usage(env) != 'not_enabled'
-        if key == 'THREATBOOK_API_KEY':
-            eligible = env.get('THREATBOOK_API_AUTHORIZED') == 'yes'
         print(label + ': ' + ('已配置' if env.get(key) and eligible else '未启用'))
     if not args.online:
         print('如需验证接口连通性，请运行 doctor --online。')
@@ -1083,8 +806,6 @@ def doctor_cmd(args):
         'IANA RDAP': lambda: bool(req_json(RDAP_BOOTSTRAP).get('services')),
         'RIPEstat': lambda: req_json(RIPESTAT_API, params={'resource':'1.1.1.1'}).get('status') == 'ok',
     }
-    if env.get('OTX_API_KEY'):
-        tests['OTX'] = lambda: req_json(f'{OTX_BASE}/example.com/general', headers={'X-OTX-API-KEY': env['OTX_API_KEY']}) is not None
     if env.get('URLSCAN_API_KEY'):
         tests['urlscan'] = lambda: req_json('https://urlscan.io/api/v1/quotas', headers={'api-key': env['URLSCAN_API_KEY']}) is not None
     if env.get('VT_API_KEY') and effective_vt_usage(env) != 'not_enabled':
@@ -1113,19 +834,7 @@ def audit_cmd(args):
         print('提示：已选择主动 TLS 探测，会与公网目标建立连接（不发送 HTTP 请求）。')
     usage = effective_vt_usage(read_env(), ctx)
     print(f'正在检查 {host}，检查完成后会生成易读的 HTML 报告。')
-    db = getattr(args, 'ioc_db', str(local_ioc.DEFAULT_DB))
-    if getattr(args, 'no_auto_ioc_update', False):
-        sync = {'status': 'disabled_by_argument', 'checked_at': utc_now(), 'target_sent': False}
-    else:
-        try:
-            sync = auto_refresh_local_ioc(db)
-        except (OSError, ValueError, local_ioc.sqlite3.Error) as exc:
-            sync = {'status': 'error', 'checked_at': utc_now(), 'errors': {'local_ioc': str(exc)[:200]}, 'target_sent': False}
-    if sync['status'] in ('partial', 'error'):
-        print('部分 IOC 更新失败，保留历史缓存并在报告中标明；继续执行其他检查。')
-    domestic_reviews = load_domestic_evidence(getattr(args, 'domestic_evidence', None), host)
-    report = build_report(host, registered, ctx, args.tls_probe,
-                          domestic_reviews=domestic_reviews, ioc_db=db)
+    report = build_report(host, registered, ctx, args.tls_probe)
     out = Path(args.output).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     previous, baseline_path = (None, None)
@@ -1140,7 +849,7 @@ def audit_cmd(args):
     user_summary = report_html.summarize(report)
     report['assessment']['risk_label'] = user_summary['title']
     report['assessment']['decision'] = user_summary['recommendation']
-    report['execution'] = {'mode': 'unattended', 'ioc_refresh': sync,
+    report['execution'] = {'mode': 'unattended',
                            'baseline_file': baseline_path, 'manual_input_required': False,
                            'api_keys_optional': True}
     safe = re.sub(r'[^a-z0-9.-]', '_', host)
@@ -1164,57 +873,16 @@ def audit_cmd(args):
     return 0
 
 
-def ioc_update_cmd(args):
-    names = list(local_ioc.FEEDS) if args.include_adtracking else [name for name, cfg in local_ioc.FEEDS.items() if cfg['enabled_by_default']]
-    if args.include_adtracking and not args.license_reviewed:
-        raise ValueError('anti-AD 为上游聚合列表，请先核实机构某些用途与上游数据许可；确认后同时使用 --license-reviewed')
-    print('仅获取开源静态数据，不上传申请域名/IP；不会自动封禁。')
-    results = local_ioc.update_feeds(db=args.ioc_db, names=names)
-    for key, value in results.items():
-        print(f"{key}: {value['status']} ({value.get('count', value.get('error', '未知'))})")
-    print('原有成功缓存遇下载失败会保留；失败源不得当作无命中。')
-    return 0 if all(v['status'] == 'ok' for v in results.values()) else 1
-
-
-def ioc_import_cmd(args):
-    if args.feed not in local_ioc.FEEDS:
-        raise ValueError('非允许的数据源')
-    if args.feed == 'cn_antiad' and not args.license_reviewed:
-        raise ValueError('导入 anti-AD 需先审核聚合上游数据许可并设置 --license-reviewed')
-    p = Path(args.file).expanduser().resolve()
-    if not p.is_file() or p.stat().st_size > local_ioc.MAX_BYTES:
-        raise ValueError('源文件不存在或超出安全大小限制')
-    payload = p.read_bytes()
-    print('只从本地文件导入离线 IOC；不做任何外部请求、不会自动封禁。')
-    result = local_ioc.update_feeds(args.ioc_db, names=[args.feed], fetcher=lambda url: payload)
-    row = result[args.feed]
-    print(f"{args.feed}: {row['status']} ({row.get('count', row.get('error', '未知'))})")
-    return 0 if row['status']=='ok' else 1
-
-
-def ioc_status_cmd(args):
-    rows = local_ioc.list_feeds(db=args.ioc_db)
-    if not rows:
-        print('尚无本地 IOC 数据库或未成功更新。请执行 ioc-update。')
-        return 0
-    for row in rows:
-        print(f"{row['feed']}: {row['item_count']} 条 | 更新 {row['updated_at']} | SHA256 {row['sha256']} | {row['license']}")
-    return 0
-
-
-def ioc_check_cmd(args):
-    host, _ = validated_domain(args.domain)
-    res = local_ioc.inspect_cached(host, args.ip or [], db=args.ioc_db)
-    print(json.dumps(res, ensure_ascii=False, indent=2))
-    return 0
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description='免费域名安全检查：首次引导配置 API，自动生成 HTML 风险报告')
     sub = parser.add_subparsers(dest='command', required=True)
     s_init = sub.add_parser('setup', aliases=['init'], help='配置或补充免费 API Key（交互式向导）')
     s_init.add_argument('--force', action='store_true', help='覆盖现有本地配置（谨慎）')
     s_init.add_argument('--non-interactive', action='store_true', help='只创建空密钥配置，不提示输入')
+    s_key = sub.add_parser('set-key', help='从 stdin 或隐藏输入保存 API Key（适用于对话式 Agent）')
+    s_key.add_argument('--name', choices=CREDENTIAL_NAMES, required=True)
+    s_key.add_argument('--stdin', action='store_true', help='从标准输入读取密钥，避免通过命令行参数暴露')
+    s_key.add_argument('--vt-tier', choices=['noncommercial','premium'], help='VirusTotal 授权类型，仅当用户确认符合条款后使用')
     s_doctor = sub.add_parser('doctor', help='检查配置，可选择检查外部 API 连通性')
     s_doctor.add_argument('--online', action='store_true', help='联网检查公共端点及已配置的 API Key')
     s_audit = sub.add_parser('audit', help='一键域名检查，生成 HTML 和 JSON 报告')
@@ -1223,31 +891,13 @@ def main(argv=None):
     s_audit.add_argument('--business-file', help='可选补充资料 JSON；普通用户无需使用')
     s_audit.add_argument('--baseline', help='可选的指定历史报告；默认自动使用 reports 中最新同域名 JSON')
     s_audit.add_argument('--no-auto-baseline', action='store_true', help='关闭自动历史基线比较')
-    s_audit.add_argument('--no-auto-ioc-update', action='store_true', help='不尝试联网更新本地 IOC（使用现有缓存）')
-    s_audit.add_argument('--domestic-evidence', help='可选历史网页复核记录，不影响自动检测')
     s_audit.add_argument('--output', default=str(ROOT / 'reports'), help='HTML 与 JSON 报告保存位置')
     s_audit.add_argument('--markdown', action='store_true', help='额外生成旧版 Markdown 技术报告')
     s_audit.add_argument('--no-prompt', action='store_true', help='不弹出首次 API 配置向导，适用于自动化任务')
     s_audit.add_argument('--tls-probe', action='store_true', help='主动连接目标公网 IP 测试 TLS（默认禁用）')
-    s_audit.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB), help='本地 SQLite IOC 规则库（只读审查；默认 data/ioc_rules.sqlite3）')
-    s_ioc_update = sub.add_parser('ioc-update', help='更新允许拉取的国内开源 IOC 本地缓存，不上传待审查域名')
-    s_ioc_update.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB))
-    s_ioc_update.add_argument('--include-adtracking', action='store_true', help='可选广告/跟踪清单；不作为恶意证据')
-    s_ioc_update.add_argument('--license-reviewed', action='store_true', help='已由机构核实聚合上游数据许可（用于 anti-AD）')
-    s_ioc_import = sub.add_parser('ioc-import', help='从批准的本地静态清单文件导入 IOC，无任何网络请求')
-    s_ioc_import.add_argument('--feed', choices=list(local_ioc.FEEDS), required=True)
-    s_ioc_import.add_argument('--file', required=True, help='通过单位批准渠道下载到本地的上游静态文件')
-    s_ioc_import.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB))
-    s_ioc_import.add_argument('--license-reviewed', action='store_true', help='anti-AD 聚合上游许可已核实')
-    s_ioc_status = sub.add_parser('ioc-status', help='查看离线 IOC 缓存版本/条数/许可')
-    s_ioc_status.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB))
-    s_ioc_check = sub.add_parser('ioc-check', help='纯离线 IOC 查询，无 DNS、无第三方请求')
-    s_ioc_check.add_argument('--domain', required=True)
-    s_ioc_check.add_argument('--ip', action='append', help='可选目标解析出的公网 IP（可多次指定）')
-    s_ioc_check.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB))
     args = parser.parse_args(argv)
     try:
-        return {'init': init_cmd, 'setup': init_cmd, 'doctor': doctor_cmd, 'audit': audit_cmd, 'ioc-update': ioc_update_cmd, 'ioc-import': ioc_import_cmd, 'ioc-status': ioc_status_cmd, 'ioc-check': ioc_check_cmd}[args.command](args)
+        return {'init': init_cmd, 'setup': init_cmd, 'set-key': set_key_cmd, 'doctor': doctor_cmd, 'audit': audit_cmd}[args.command](args)
     except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
         parser.exit(2, f'参数/配置错误：{exc}\n')
     except KeyboardInterrupt:

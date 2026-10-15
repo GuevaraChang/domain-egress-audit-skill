@@ -7,12 +7,8 @@ from urllib.parse import urlparse
 
 SOURCE_NAMES = {
     'rdap': '域名注册信息', 'dns': 'DNS 解析', 'ripestat': 'IP / 服务器归属',
-    'crtsh': '网站证书历史', 'otx': 'OTX 威胁情报', 'urlscan': '网站历史扫描',
+    'crtsh': '网站证书历史', 'urlscan': '网站历史扫描',
     'virustotal': 'VirusTotal 安全检测', 'tls': 'HTTPS 连接测试',
-    'threatbook_api': '微步威胁情报', 'local_ioc': '开源安全名单',
-    'threatbook_x_manual': '微步网页人工记录',
-    'qianxin_ti_manual': '奇安信网页人工记录',
-    'tencent_tix_manual': '腾讯安全网页人工记录',
 }
 
 def esc(value):
@@ -25,21 +21,18 @@ def summarize(report):
     major = [x for x in findings if x.get('severity') in ('high', 'medium')]
     high = [x for x in major if x.get('severity') == 'high']
     sources = report.get('sources') or {}
-    # Require DNS + current local IOC + at least one independent remote TI signal.
+    # Do not rate a domain clear unless DNS and one real reputation API completed.
     # RDAP is context only and never proves a benign domain.
     dns_ok = (sources.get('dns') or {}).get('status') == 'ok'
-    ioc_ok = (sources.get('local_ioc') or {}).get('status') == 'ok' and not any(
-        x.get('stale') for x in ((sources.get('local_ioc') or {}).get('data') or {}).get('feeds', []))
-    intel_ok = any((sources.get(k) or {}).get('status') == 'ok' for k in
-                   ('otx', 'virustotal', 'threatbook_api'))
+    intel_ok = (sources.get('virustotal') or {}).get('status') == 'ok'
     if high:
         return dict(level='danger', title='发现严重风险', recommendation='不建议访问这个域名。优先核实恶意情报并停止输入信息或下载文件。',
                     reason='发现至少一条明确的高风险证据。')
     if major:
         return dict(level='caution', title='发现可疑问题', recommendation='建议暂缓访问，先核实下方列出的具体风险线索。',
                     reason=f'本次检查发现 {len(major)} 条需要关注的风险线索。')
-    if not (dns_ok and ioc_ok and intel_ok):
-        missing = [name for enabled, name in [(dns_ok, 'DNS'), (ioc_ok, '安全名单'), (intel_ok, '威胁情报')] if not enabled]
+    if not (dns_ok and intel_ok):
+        missing = [name for enabled, name in [(dns_ok, 'DNS'), (intel_ok, 'VirusTotal 域名信誉')] if not enabled]
         return dict(level='unknown', title='信息不足，暂时无法判断', recommendation='建议先补齐下方未完成的检查，再决定是否访问或输入敏感信息。',
                     reason='关键检查尚未完成：' + '、'.join(missing) + '。')
     return dict(level='clear', title='暂未发现明显风险', recommendation='可以谨慎访问，但请核实网站身份，避免泄露密码、验证码或下载未知程序。',
@@ -53,8 +46,6 @@ def source_view(key, item, problems):
     matched = key in problems
     if matched:
         return ('warn', '发现线索', f'{title}发现需要核实的信息')
-    if key == 'local_ioc' and state == 'ok' and any(x.get('stale') for x in (item.get('data') or {}).get('feeds', [])):
-        return ('mute', '数据过期', '部分本地安全名单过期，建议刷新后重查')
     if state == 'ok':
         return ('ok', '已完成', f'{title}已查询；在本次规则范围内没有触发明显异常')
     if state == 'empty':
@@ -82,9 +73,8 @@ def render(report):
     if any(f.get('type') == 'data_egress' for f in findings):
         display_findings.extend(f for f in findings if f.get('type') == 'data_egress')
     mapping = {'rdap': {'new_domain', 'young_domain'}, 'dns': {'non_public_ip'},
-               'virustotal': {'virustotal_detection'}, 'otx': {'otx_pulse'},
-               'urlscan': {'off_domain_redirect'}, 'threatbook_api': {'threatbook_intel_signal'},
-               'local_ioc': {'local_phishing_ioc', 'local_ip_association', 'local_adtracking'},
+               'virustotal': {'virustotal_detection'},
+               'urlscan': {'off_domain_redirect'},
                'tls': {'tls_probe_failed'}}
     positive = {k for k, v in mapping.items() if any(f.get('type') in v for f in display_findings)}
     def problem_card(f):
@@ -94,7 +84,7 @@ def render(report):
     problem_html = ''.join(problem_card(f) for f in display_findings[:7]) if display_findings else '<p class="quiet">本次成功完成的检查中，没有发现明显风险线索。</p>'
     successful = []
     unknown = []
-    for key in ('dns', 'rdap', 'ripestat', 'crtsh', 'local_ioc', 'otx', 'urlscan', 'virustotal', 'threatbook_api', 'tls'):
+    for key in ('dns', 'rdap', 'ripestat', 'crtsh', 'urlscan', 'virustotal', 'tls'):
         item = sources.get(key) or {}
         kind, state, detail = source_view(key, item, positive)
         row = f'<li><span>{esc(SOURCE_NAMES.get(key, key))}</span><span class="state {kind}">{esc(state)}</span></li>'
@@ -149,6 +139,6 @@ a{color:#1d5aa6}footer{font-size:12px;color:#586679;line-height:1.7;margin-top:2
 <section class="grid"><div class="panel"><h2>已经检查</h2>%s</div>
 <div class="panel"><h2>未完成或未配置</h2>%s</div></section>
 <section class="panel"><h2>技术详情（需要时再看）</h2><p class="small">点击展开即可查看原始证据，不需要阅读全部内容。</p>%s</section>
-<footer>报告编号：%s。由公开信息及本地安全名单自动生成，只代表当前成功完成的检查；未查到不等于绝对安全。报告不主动批准、拦截或修改任何网络访问。</footer>
+<footer>报告编号：%s。由公开数据源自动生成，只代表当前成功完成的检查；未查到不等于绝对安全。报告不主动批准、拦截或修改任何网络访问。</footer>
 </main></body></html>''' % (domain, domain, checked, esc(summary['level']), esc(summary['title']), esc(summary['reason']), esc(summary['recommendation']), problem_html, success_html, unknown_html, ''.join(details), rid)
     return html_text

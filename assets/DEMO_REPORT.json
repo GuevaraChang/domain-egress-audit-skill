@@ -1,51 +1,236 @@
 {
-  "report_id": "DEMO-ONLY",
-  "domain": "demo.example.org",
-  "checked_at": "2026-10-15T00:00:00+00:00",
-  "assessment": {
-    "findings": [
-      {
-        "type": "young_domain",
-        "severity": "low",
-        "detail": "示例：这个域名注册时间较短，请留意网站身份（合成演示数据）。"
-      }
-    ]
+  "schema_version": "1.8.0",
+  "report_id": "DEMO-NO-ACTUAL-SCAN",
+  "checked_at": "2026-10-15T00:00:00Z",
+  "domain": "example.com",
+  "registered_domain": "example.com",
+  "business_context": {
+    "context_status": "not_provided"
   },
   "sources": {
     "dns": {
       "status": "ok",
-      "summary": "解析已完成",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "summary": "示例：查询已完成",
       "data": {
-        "A": [
-          "203.0.113.10"
-        ]
-      }
+        "ips": [
+          {
+            "ip": "203.0.113.15",
+            "globally_routable": true
+          }
+        ],
+        "records": {
+          "A": [
+            "203.0.113.15"
+          ],
+          "AAAA": [],
+          "CNAME": [],
+          "NS": [
+            "ns1.example.com"
+          ]
+        }
+      },
+      "error": null,
+      "source_url": null
     },
     "rdap": {
       "status": "ok",
-      "summary": "注册记录已读取",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "summary": "示例：已取得注册记录",
       "data": {
-        "age_days": 24
-      }
-    },
-    "local_ioc": {
-      "status": "ok",
-      "summary": "本地规则已加载",
-      "data": {
-        "feeds": []
-      }
-    },
-    "otx": {
-      "status": "not_configured"
-    },
-    "urlscan": {
-      "status": "not_configured"
-    },
-    "crtsh": {
-      "status": "ok"
+        "age_days": 415,
+        "registered_domain": "example.com",
+        "registrar": "Example Registrar"
+      },
+      "error": null,
+      "source_url": null
     },
     "ripestat": {
-      "status": "ok"
+      "status": "ok",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "summary": "示例：网络归属查询已完成",
+      "data": {
+        "results": []
+      },
+      "error": null,
+      "source_url": null
+    },
+    "crtsh": {
+      "status": "ok",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "summary": "示例：已查询证书历史",
+      "data": {},
+      "error": null,
+      "source_url": null
+    },
+    "urlscan": {
+      "status": "not_configured",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "summary": "可配置 urlscan.io API Key 查询网页历史",
+      "data": {},
+      "error": null,
+      "source_url": null
+    },
+    "virustotal": {
+      "status": "not_configured",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "summary": "可配置授权有效的 VirusTotal API Key 查询域名信誉",
+      "data": {},
+      "error": null,
+      "source_url": null
+    },
+    "tls": {
+      "status": "skipped",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "summary": "默认不主动连接目标站点",
+      "data": {},
+      "error": null,
+      "source_url": null
     }
+  },
+  "assessment": {
+    "findings": [],
+    "pending_items": [
+      "在线信誉数据未配置"
+    ],
+    "automatic_approval": false,
+    "risk_label": "信息不足，暂时无法判断",
+    "decision": "建议先补齐下方未完成的检查，再决定是否访问或输入敏感信息。"
+  },
+  "execution": {
+    "mode": "demo_synthetic",
+    "api_keys_optional": true
+  },
+  "evidence_ledger": [
+    {
+      "id": "EV-01",
+      "source": "dns",
+      "source_name": "运行机当前 DNS",
+      "status": "ok",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "observed_at": null,
+      "observation_age_days": null,
+      "evidence_url": null,
+      "interpretation_limit": "当前机器解析器视角，非公网权威全景",
+      "scope": "FQDN / 注册域 / 解析 IP：详见 sources.dns"
+    },
+    {
+      "id": "EV-02",
+      "source": "rdap",
+      "source_name": "注册局 RDAP",
+      "status": "ok",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "observed_at": null,
+      "observation_age_days": null,
+      "evidence_url": null,
+      "interpretation_limit": "注册信息：不直接确认真实经营主体",
+      "scope": "FQDN / 注册域 / 解析 IP：详见 sources.rdap"
+    },
+    {
+      "id": "EV-03",
+      "source": "ripestat",
+      "source_name": "RIPEstat",
+      "status": "ok",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "observed_at": null,
+      "observation_age_days": null,
+      "evidence_url": null,
+      "interpretation_limit": "路由归属信息：非安全信誉分数",
+      "scope": "FQDN / 注册域 / 解析 IP：详见 sources.ripestat"
+    },
+    {
+      "id": "EV-04",
+      "source": "crtsh",
+      "source_name": "crt.sh / CT",
+      "status": "ok",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "observed_at": null,
+      "observation_age_days": null,
+      "evidence_url": null,
+      "interpretation_limit": "历史证书记录：不等于实时 TLS 有效性",
+      "scope": "FQDN / 注册域 / 解析 IP：详见 sources.crtsh"
+    },
+    {
+      "id": "EV-05",
+      "source": "urlscan",
+      "source_name": "urlscan",
+      "status": "not_configured",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "observed_at": null,
+      "observation_age_days": null,
+      "evidence_url": null,
+      "interpretation_limit": "公开历史扫描，可能过时/样本有偏",
+      "scope": "FQDN / 注册域 / 解析 IP：详见 sources.urlscan"
+    },
+    {
+      "id": "EV-06",
+      "source": "virustotal",
+      "source_name": "VirusTotal",
+      "status": "not_configured",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "observed_at": null,
+      "observation_age_days": null,
+      "evidence_url": null,
+      "interpretation_limit": "第三方检测统计，不等于恶意定性；某些用途自动跳过",
+      "scope": "FQDN / 注册域 / 解析 IP：详见 sources.virustotal"
+    },
+    {
+      "id": "EV-07",
+      "source": "tls",
+      "source_name": "可选 TLS 探测",
+      "status": "skipped",
+      "checked_at": "2026-10-15T10:07:22+00:00",
+      "observed_at": null,
+      "observation_age_days": null,
+      "evidence_url": null,
+      "interpretation_limit": "仅在明确授权时可做的实时目标连接",
+      "scope": "FQDN / 注册域 / 解析 IP：详见 sources.tls"
+    }
+  ],
+  "evidence_coverage": {
+    "status_counts": {
+      "ok": 4,
+      "empty": 0,
+      "error": 0,
+      "not_configured": 2,
+      "skipped": 1
+    },
+    "stale_observations_over_90_days": [],
+    "note": "覆盖率表示查询是否完成，不是域名安全得分。skipped/empty 不代表安全。"
+  },
+  "asset_inventory": [
+    {
+      "hostname": "example.com",
+      "role": "申请访问的唯一 FQDN",
+      "relationship": "申请目标",
+      "in_approved_scope": true,
+      "ips": [
+        "203.0.113.15"
+      ],
+      "cname_targets": [],
+      "attribution": "域名与申请相关，但供应商所有权未由 DNS 证明",
+      "attribution_confidence": "unconfirmed",
+      "evidence_source": "dns",
+      "observed_at": "2026-10-15T10:07:22+00:00"
+    }
+  ],
+  "technical_assessment": {
+    "verdict": "no_obvious_signals_in_checked_sources",
+    "label": "已完成主要自动检查，未触发明显技术风险信号（不代表安全）",
+    "source_statuses": {
+      "rdap": "ok",
+      "dns": "ok",
+      "ripestat": "ok",
+      "crtsh": "ok",
+      "urlscan": "not_configured",
+      "virustotal": "not_configured",
+      "tls": "skipped"
+    },
+    "core_sources_complete": true,
+    "signal_types": [],
+    "business_data_risk": "not_assessed",
+    "access_authorization": "not_granted",
+    "automatic_approval": false,
+    "limitations": "公开情报的自动判断；业务必要性、数据分类、真实归属和授权控制不能仅靠公网域名信息证明。"
   }
 }

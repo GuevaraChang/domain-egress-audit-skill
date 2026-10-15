@@ -8,3 +8,5 @@ business_context.json
 **/business_context.json
 
 data/
+
+.env.tmp

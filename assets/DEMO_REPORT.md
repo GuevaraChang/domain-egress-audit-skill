@@ -1,5 +1,7 @@
-# HTML 报告预览说明
+# 虚构示例 · 域名安全报告
 
-请打开本目录的 `DEMO_REPORT.html` 查看独立页面版的示例。页面所有数据都是为演示造出的模拟状态，不对应真实网站。
+目标域名：example.com
 
-运行 `python scripts/domain_audit.py audit --domain example.com` 后，会生成真正的 `reports/*.html` 和 `reports/*.json`。
+结论：信息不足，暂时无法判断。DNS、RDAP 等基础检查已完成，VirusTotal 和 urlscan 尚未配置；请参阅同目录 HTML 报告。
+
+该示例不代表真实查询结果。

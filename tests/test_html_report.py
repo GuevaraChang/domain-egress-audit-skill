@@ -23,21 +23,18 @@ def sample(sources=None, findings=None):
 
 class HtmlReportTests(unittest.TestCase):
     def test_four_plain_language_verdicts(self):
-        ok = {key:a.source('ok') for key in ['dns','local_ioc','otx']}
-        ok['local_ioc']['data']={'feeds':[{'stale':False}]}
+        ok = {key:a.source('ok') for key in ['dns','virustotal']}
         self.assertEqual(h.summarize(sample(ok))['level'],'clear')
         self.assertEqual(h.summarize(sample({}))['level'],'unknown')
         self.assertEqual(h.summarize(sample(ok,[{'severity':'medium','detail':'异常解析'}]))['level'],'caution')
         self.assertEqual(h.summarize(sample(ok,[{'severity':'high','detail':'已确认恶意'}]))['level'],'danger')
 
-    def test_stale_ioc_cannot_be_reported_as_clear(self):
-        ok = {key:a.source('ok') for key in ['dns','local_ioc','otx']}
-        ok['local_ioc']['data']={'feeds':[{'stale':True}]}
+    def test_no_reputation_result_cannot_be_reported_as_clear(self):
+        ok={'dns':a.source('ok'),'virustotal':a.source('not_configured')}
         self.assertEqual(h.summarize(sample(ok))['level'],'unknown')
-        self.assertEqual(h.source_view('local_ioc',ok['local_ioc'],set())[1],'数据过期')
 
     def test_html_escapes_untrusted_domain_and_intel_values(self):
-        report=sample({'otx':a.source('ok',data={'bad':'<script>alert(42)</script>'},summary='<img src=x onerror=alert(2)>')},
+        report=sample({'virustotal':a.source('ok',data={'bad':'<script>alert(42)</script>'},summary='<img src=x onerror=alert(2)>')},
                       [{'severity':'medium','detail':'<svg onload=alert(1)>'}])
         report['domain']='<script>alert(5)</script>'
         html=h.render(report)
@@ -51,23 +48,22 @@ class HtmlReportTests(unittest.TestCase):
         self.assertIn('<details>',html)
 
     def test_unconfigured_source_never_marked_ok(self):
-        html=h.render(sample({'otx': a.source('not_configured')}))
+        html=h.render(sample({'virustotal': a.source('not_configured')}))
         self.assertIn('未配置',html)
         self.assertEqual(h.summarize(sample({}))['level'],'unknown')
 
     def test_audit_writes_html_and_json_without_context_file(self):
         with tempfile.TemporaryDirectory() as temp:
             args=Namespace(domain='example.net',registered_domain=None,business_file=None,
-                baseline=None,domestic_evidence=None,output=temp,tls_probe=False,
-                ioc_db=str(Path(temp)/'db.sqlite3'),no_auto_baseline=True,
-                no_auto_ioc_update=True,no_prompt=True,markdown=False)
+                baseline=None,output=temp,tls_probe=False,
+                no_auto_baseline=True,no_prompt=True,markdown=False)
             mocksrc={k:a.source('not_configured') for k in
-                     ('rdap','dns','ripestat','crtsh','otx','urlscan','virustotal','tls','threatbook_api','local_ioc')}
+                     ('rdap','dns','ripestat','crtsh','virustotal','urlscan','tls')}
             mocksrc['dns']=a.source('ok',data={'ips':[], 'records':{}})
             fake=sample(mocksrc)
             fake.update({'registered_domain':'example.net', 'business_context': {'context_status':'not_provided'},
                          'technical_assessment':{'label':'模拟测试'},'evidence_ledger':[],'asset_inventory':[],
-                         'domestic_cross_validation':{'matrix':[]},'assessment':{'findings':[], 'pending_items':[]}})
+                         'assessment':{'findings':[], 'pending_items':[]}})
             with patch.object(a,'build_report',return_value=fake), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(a.audit_cmd(args),0)
             self.assertEqual(len(list(Path(temp).glob('*.html'))),1)
