@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 SOURCE_NAMES = {
     'rdap': '域名注册信息', 'dns': 'DNS 解析', 'ripestat': 'IP / 服务器归属',
-    'crtsh': '网站证书历史', 'urlscan': '网站历史扫描',
+    'crtsh': '网站证书历史', 'urlscan': '网站历史扫描', 'urlscan_live': '可选实时网页扫描',
     'virustotal': 'VirusTotal 安全检测', 'tls': 'HTTPS 连接测试',
     'local_ioc': '免费开源安全名单',
 }
@@ -32,8 +32,10 @@ def summarize(report):
     if major:
         return dict(level='caution', title='发现可疑问题', recommendation='建议暂缓访问，先核实下方列出的具体风险线索。',
                     reason=f'本次检查发现 {len(major)} 条需要关注的风险线索。')
-    if not (dns_ok and intel_ok):
-        missing = [name for enabled, name in [(dns_ok, 'DNS'), (intel_ok, 'VirusTotal 域名信誉')] if not enabled]
+    history_partial = (sources.get('urlscan') or {}).get('status') == 'partial'
+    if not (dns_ok and intel_ok) or history_partial:
+        missing = [name for enabled, name in [(dns_ok, 'DNS'), (intel_ok, 'VirusTotal 域名信誉'),
+                                              (not history_partial, 'urlscan 历史详情（部分缺失）')] if not enabled]
         return dict(level='unknown', title='信息不足，暂时无法判断', recommendation='建议先补齐下方未完成的检查，再决定是否访问或输入敏感信息。',
                     reason='关键检查尚未完成：' + '、'.join(missing) + '。')
     return dict(level='clear', title='暂未发现明显风险', recommendation='可以谨慎访问，但请核实网站身份，避免泄露密码、验证码或下载未知程序。',
@@ -56,6 +58,8 @@ def source_view(key, item, problems):
             if any(f.get('stale') for f in feeds):
                 return ('warn', '部分过期', '部分本地情报未能及时更新，需谨慎解释结果')
         return ('ok', '已完成', f'{title}已查询；在本次规则范围内没有触发明显异常')
+    if state == 'partial':
+        return ('mute', '部分完成', '已取得部分历史扫描详情，剩余数据可能因权限、配额或历史记录失效而缺失')
     if state == 'empty':
         return ('mute', '未找到数据', f'{title}未找到可用的历史记录')
     if state == 'skipped':
@@ -82,7 +86,7 @@ def render(report):
         display_findings.extend(f for f in findings if f.get('type') == 'data_egress')
     mapping = {'rdap': {'new_domain', 'young_domain'}, 'dns': {'non_public_ip'},
                'virustotal': {'virustotal_detection'},
-               'urlscan': {'off_domain_redirect'},
+               'urlscan': {'off_domain_redirect', 'urlscan_historical_malicious'},
                'local_ioc': {'local_phishing_ioc', 'local_ip_association', 'local_adtracking'},
                'tls': {'tls_probe_failed'}}
     positive = {k for k, v in mapping.items() if any(f.get('type') in v for f in display_findings)}
@@ -93,7 +97,7 @@ def render(report):
     problem_html = ''.join(problem_card(f) for f in display_findings[:7]) if display_findings else '<p class="quiet">本次成功完成的检查中，没有发现明显风险线索。</p>'
     successful = []
     unknown = []
-    for key in ('dns', 'rdap', 'ripestat', 'crtsh', 'urlscan', 'local_ioc', 'virustotal', 'tls'):
+    for key in ('dns', 'rdap', 'ripestat', 'crtsh', 'urlscan', 'urlscan_live', 'local_ioc', 'virustotal', 'tls'):
         item = sources.get(key) or {}
         kind, state, detail = source_view(key, item, positive)
         row = f'<li><span>{esc(SOURCE_NAMES.get(key, key))}</span><span class="state {kind}">{esc(state)}</span></li>'
@@ -113,6 +117,45 @@ def render(report):
         details.append(f'<details><summary>{esc(label)} · {esc(status_text)}</summary>'
                        f'<p class="fine">{esc(src.get("summary") or "无说明")}　{source_link}</p>'
                        f'<pre>{esc(data)}</pre></details>')
+    # A readable history timeline, no DOM/cookies/raw request headers embedded in the HTML.
+    history = (sources.get('urlscan') or {}).get('data') or {}
+    history_entries = history.get('results') or []
+    if history_entries:
+        def history_card(x):
+            title = esc(x.get('page_title') or '无页面标题')
+            date = esc(x.get('scan_time') or '时间未知')
+            host = esc(x.get('result_page_host') or '未知')
+            address = esc(x.get('ip') or '未知')
+            requests_count = esc(x.get('total_requests') or 0)
+            external_count = esc(x.get('external_resource_domains_count') or 0)
+            offsite = '<span class="state warn">存在跨域跳转</span>' if x.get('redirected') == 'off-domain' else ''
+            flagged = '<span class="state warn">历史扫描被标记</span>' if x.get('urlscan_malicious') else ''
+            result_link = clean_href(x.get('result_url'))
+            link = f'<a href="{esc(result_link)}" target="_blank" rel="noopener noreferrer">查看扫描证据 ↗</a>' if result_link else ''
+            return (f'<div class="history-item"><b>{title}</b>　{offsite} {flagged}'
+                    f'<p class="fine">扫描：{date} · 页面域名：{host} · IP：{address}</p>'
+                    f'<p class="small">请求 {requests_count} 次 · 外部资源域名 {external_count} 个　{link}</p></div>')
+        history_html = ('<p class="small">以下为已有的第三方历史扫描，不能代替网站当前状态。'
+                        '没有记录或没有历史风险命中，不等于安全。</p>'
+                        f'<div class="history-stats"><b>详细记录 {esc(history.get("detailed_results", len(history_entries)))}</b>'
+                        f' · 历史 IP {esc(len(history.get("history_ips") or []))} 个'
+                        f' · 跨域跳转 {esc(history.get("cross_domain_redirects", 0))} 次</div>'
+                        + ''.join(history_card(x) for x in history_entries[:8]))
+        if len(history_entries) > 8:
+            history_html += f'<p class="small">另有 {len(history_entries)-8} 条记录详见下方技术详情和 JSON 文件。</p>'
+    elif (sources.get('urlscan') or {}).get('status') == 'empty':
+        history_html = '<p class="quiet">查询范围内没有找到历史扫描，不代表网站安全。</p>'
+    elif (sources.get('urlscan') or {}).get('status') in ('not_configured','skipped'):
+        history_html = '<p class="quiet">未配置 urlscan API Key，网站历史扫描尚未执行。</p>'
+    else:
+        history_html = '<p class="quiet">历史扫描数据暂时不可用，未能作出判断。</p>'
+    live = sources.get('urlscan_live') or {}
+    if live.get('status') in ('ok', 'partial'):
+        link = clean_href(live.get('source_url'))
+        history_html += '<p class="small">本次已按用户明确请求提交实时扫描。'
+        if link:
+            history_html += f' <a href="{esc(link)}" target="_blank" rel="noopener noreferrer">查看本次结果 ↗</a>'
+        history_html += '</p>'
     domain = esc(report.get('domain', '未知域名'))
     checked = esc(report.get('checked_at') or '未知时间')
     rid = esc(report.get('report_id', '—'))
@@ -135,7 +178,7 @@ header{margin-bottom:24px}h1{font-size:26px;margin:0 0 8px;letter-spacing:-.02em
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid .panel{margin:0}.checklist{list-style:none;padding:0;margin:0}
 .checklist li{display:flex;gap:12px;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #edf0f4;font-size:14px}
 .checklist li:last-child{border:0}.state{white-space:nowrap;font-weight:700}.state.ok{color:#258064}.state.warn{color:#a15f00}.state.mute{color:#707c8d}
-details{border-top:1px solid #e9eef3;padding:14px 0}details summary{cursor:pointer;font-size:14px;font-weight:650}
+.history-item{border-top:1px solid #edf0f4;padding:12px 0}.history-item p{margin:6px 0}.history-stats{background:#f5f7fa;border-radius:8px;padding:10px;font-size:13px}details{border-top:1px solid #e9eef3;padding:14px 0}details summary{cursor:pointer;font-size:14px;font-weight:650}
 pre{white-space:pre-wrap;word-wrap:break-word;background:#f3f6fa;border-radius:8px;padding:12px;font-size:12px;max-height:380px;overflow:auto}
 a{color:#1d5aa6}footer{font-size:12px;color:#586679;line-height:1.7;margin-top:22px}
 @media(max-width:660px){main{margin:18px auto;padding:0 12px 28px}.panel{padding:18px}.grid{grid-template-columns:1fr}.status{font-size:22px}h1{font-size:23px}}
@@ -145,9 +188,10 @@ a{color:#1d5aa6}footer{font-size:12px;color:#586679;line-height:1.7;margin-top:2
 <section class="panel hero %s"><div class="small">检查结论</div><div class="status">%s</div>
 <p class="small">%s</p><p class="recommend">建议：%s</p></section>
 <section class="panel"><h2>发现的问题</h2>%s</section>
+<section class="panel"><h2>网站历史扫描</h2>%s</section>
 <section class="grid"><div class="panel"><h2>已经检查</h2>%s</div>
 <div class="panel"><h2>未完成或未配置</h2>%s</div></section>
 <section class="panel"><h2>技术详情（需要时再看）</h2><p class="small">点击展开即可查看原始证据，不需要阅读全部内容。</p>%s</section>
 <footer>报告编号：%s。由公开数据源自动生成，只代表当前成功完成的检查；未查到不等于绝对安全。报告不主动批准、拦截或修改任何网络访问。</footer>
-</main></body></html>''' % (domain, domain, checked, esc(summary['level']), esc(summary['title']), esc(summary['reason']), esc(summary['recommendation']), problem_html, success_html, unknown_html, ''.join(details), rid)
+</main></body></html>''' % (domain, domain, checked, esc(summary['level']), esc(summary['title']), esc(summary['reason']), esc(summary['recommendation']), problem_html, history_html, success_html, unknown_html, ''.join(details), rid)
     return html_text

@@ -16,6 +16,7 @@ import re
 import socket
 import ssl
 import sys
+import time
 from datetime import datetime, timezone
 from urllib.parse import quote, urlparse
 
@@ -29,10 +30,15 @@ import local_ioc
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV = ROOT / '.env'
-UA = 'DomainSafetySkill/1.9 (read-only domain inspection)'
+UA = 'DomainSafetySkill/2.1 (historical scan details + opt-in live scan)'
 TIMEOUT = 9
 RDAP_BOOTSTRAP = 'https://data.iana.org/rdap/dns.json'
 URLSCAN_SEARCH = 'https://urlscan.io/api/v1/search/'
+URLSCAN_RESULT = 'https://urlscan.io/api/v1/result/'
+URLSCAN_SUBMIT = 'https://urlscan.io/api/v1/scan/'
+UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+URLSCAN_HISTORY_DEFAULT = 15
+URLSCAN_HISTORY_LIMIT = 50
 VT_DOMAIN_API = 'https://www.virustotal.com/api/v3/domains'
 VT_POLICY_URL = 'https://docs.virustotal.com/reference/public-vs-premium-api'
 VT_KEY_URL = 'https://www.virustotal.com/gui/my-apikey'
@@ -272,31 +278,162 @@ def crt_check(registered):
         return source('error', error=exc, url=url)
 
 
-def urlscan_check(host, api_key):
-    # Only searches PRE-EXISTING public scans; never submits scans or internal URLs.
+def urlscan_scan_detail(doc, scan_id, host, *, search_item=None):
+    """Summarise one EXISTING scan's full Result JSON without storing raw DOM/cookies/PII."""
+    item = search_item or {}
+    task = doc.get('task') or item.get('task') or {}
+    page = doc.get('page') or item.get('page') or {}
+    lists = doc.get('lists') or {}
+    stats = doc.get('stats') or {}
+    verdicts = doc.get('verdicts') or {}
+    final_url = page.get('url') or ''
+    final_host = (urlparse(final_url).hostname or page.get('domain') or '').lower()
+    original_host = (urlparse(task.get('url') or '').hostname or task.get('domain') or host).lower()
+    raw_domains = [str(v).lower().rstrip('.') for v in (lists.get('domains') or []) if isinstance(v, str)]
+    external_domains = sorted({v for v in raw_domains if v and v != host and not v.endswith('.' + host)})
+    # Only record resource hosts. Query strings, cookies, headers, and response bodies are excluded.
+    resource_hosts = set()
+    for record in (doc.get('data') or {}).get('requests') or []:
+        request = (record.get('request') or {}) if isinstance(record, dict) else {}
+        req = request.get('request') or request
+        u = req.get('url') if isinstance(req, dict) else None
+        if isinstance(u, str):
+            value = urlparse(u).hostname
+            if value:
+                resource_hosts.add(value.lower())
+    external_domains = sorted(set(external_domains) | {
+        v for v in resource_hosts if v != host and not v.endswith('.'+host)
+    })
+    uv = verdicts.get('urlscan') or {}
+    return {
+        'scan_id': scan_id,
+        'scan_time': task.get('time') or (item.get('task') or {}).get('time'),
+        'task_url_host': original_host,
+        'result_page_host': final_host,
+        'page_title': str(page.get('title') or '')[:180],
+        'status_code': page.get('status'), 'ip': page.get('ip'),
+        'redirected': 'off-domain' if final_host and final_host != original_host else ('on-domain' if page.get('redirected') else 'none'),
+        'total_requests': stats.get('requests') if isinstance(stats.get('requests'), int) else len((doc.get('data') or {}).get('requests') or []),
+        'external_resource_domains_count': len(external_domains),
+        'external_resource_domains': external_domains[:35],
+        'urlscan_malicious': uv.get('malicious') is True,
+        'urlscan_score': uv.get('score') if isinstance(uv.get('score'), (int, float)) else None,
+        'result_url': 'https://urlscan.io/result/' + scan_id + '/',
+        'screenshot_url': 'https://urlscan.io/screenshots/' + scan_id + '.png',
+        'scope': '第三方历史扫描完整结果的摘要；不代表当前页面状态或全部网站历史',
+    }
+
+
+def urlscan_fetch_detail(scan_id, api_key, host, *, search_item=None):
+    if not UUID_PATTERN.fullmatch(str(scan_id)):
+        raise ValueError('urlscan 扫描 ID 无效，拒绝下载未知地址')
+    doc = req_json(URLSCAN_RESULT + scan_id + '/', headers={'api-key': api_key}, timeout=12)
+    if not isinstance(doc, dict):
+        raise ValueError('历史扫描详情响应格式错误')
+    return urlscan_scan_detail(doc, scan_id, host, search_item=search_item)
+
+
+def urlscan_check(host, api_key, *, max_scans=URLSCAN_HISTORY_DEFAULT):
+    """Search existing scans and fetch detailed JSON for each selected scan; never submit."""
     if not api_key:
-        return source('not_configured', summary='urlscan API Key 未配置；不主动提交 URL', url='https://urlscan.io/docs/api/')
+        return source('not_configured', summary='未配置 urlscan API Key，历史完整扫描未执行；不提交新扫描',
+                      url='https://urlscan.io/docs/api/')
+    limit = min(max(1, int(max_scans)), URLSCAN_HISTORY_LIMIT)
     try:
         raw = req_json(URLSCAN_SEARCH, headers={'api-key': api_key},
-                       params={'q': f'(task.domain.keyword:"{host}" OR page.domain.keyword:"{host}")', 'size': 15})
-        items = []
+                       params={'q': f'(task.domain.keyword:"{host}" OR page.domain.keyword:"{host}")', 'size': limit})
+        rows = []
         for entry in raw.get('results') or []:
-            page = entry.get('page') or {}
-            task = entry.get('task') or {}
+            page, task = entry.get('page') or {}, entry.get('task') or {}
             if (page.get('domain') or '').lower() != host and (task.get('domain') or '').lower() != host:
                 continue
-            items.append({'scan_time': task.get('time'), 'task_url_host': task.get('domain'),
-                          'result_page_host': urlparse(page.get('url') or '').hostname, 'status_code': page.get('status'),
-                          'redirected': page.get('redirected'), 'result_url': entry.get('result'),
-                          'ip': page.get('ip'), 'scope': '历史第三方扫描，不代表当前访问路径',
-                          'relation_confidence': 'low' if (page.get('domain') or '').lower() != host else 'medium'})
-        return source('ok' if items else 'empty', summary='仅查询已有扫描历史；样本不全面且部分历史可能已过期',
-                      data={'matched_results': len(items), 'results': items[:15],
-                            'returned_results': len(raw.get('results') or [])},
-                      url='https://urlscan.io/search/#task.domain.keyword:' + quote(host))
-    except (requests.RequestException, ValueError, KeyError) as exc:
-        return source('error', error=exc, url=URLSCAN_SEARCH)
+            rows.append(entry)
+        selected = rows[:limit]
+        if not selected:
+            return source('empty', summary='该账户可搜索的历史范围内未发现扫描记录；不证明网站安全',
+                          data={'matched_results':0, 'detailed_results':0, 'results':[],
+                                'history_limit':limit,'search_date_limit_days':raw.get('search_date_limit_days'),
+                                'scope':'仅 urlscan 可见的历史范围'},
+                          url='https://urlscan.io/search/#domain:' + quote(host))
+        results, problems = [], []
+        for item in selected:
+            scan_id = str(item.get('_id') or (item.get('task') or {}).get('uuid') or '')
+            if not UUID_PATTERN.fullmatch(scan_id):
+                problems.append('历史记录未返回有效扫描 ID')
+                # Missing detail stays partial. Search preview is NOT a complete scan.
+                continue
+            try:
+                results.append(urlscan_fetch_detail(scan_id, api_key, host, search_item=item))
+            except requests.HTTPError as exc:
+                code = exc.response.status_code if exc.response is not None else None
+                problems.append(f'扫描 {scan_id[:8]} 详情不可用（HTTP {code or "?"}）')
+                if code == 429:
+                    break  # Respect quota; do not retry repeatedly.
+            except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+                problems.append(f'扫描 {scan_id[:8]} 详情失败（{type(exc).__name__}）')
+        status = 'ok' if len(results) == len(selected) else 'partial'
+        ips = sorted({v.get('ip') for v in results if v.get('ip')})
+        titles = sorted({v.get('page_title') for v in results if v.get('page_title')})
+        redirect_count = sum(v.get('redirected') == 'off-domain' for v in results)
+        malicious_count = sum(v.get('urlscan_malicious') is True for v in results)
+        return source(status, summary=f'已读取 {len(results)}/{len(selected)} 条历史扫描完整结果摘要，跨域跳转 {redirect_count} 条；仅反映历史行为',
+                      data={'matched_results': len(selected), 'detailed_results':len(results),
+                            'results':results, 'history_limit':limit,
+                            'search_has_more':bool(raw.get('has_more')),
+                            'search_date_limit_days':raw.get('search_date_limit_days'),
+                            'history_ips':ips, 'historical_titles':titles[:20],
+                            'cross_domain_redirects': redirect_count,
+                            'urlscan_malicious_scans':malicious_count,
+                            'detail_errors':problems[:15],
+                            'coverage_note':'读取可见历史记录的详情，非全网或无限量历史扫描；截图提供链接但未自动下载'},
+                      url='https://urlscan.io/search/#domain:' + quote(host))
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        return source('error', summary='urlscan 历史扫描查询失败，不当作安全', error=exc, url=URLSCAN_SEARCH)
 
+
+def urlscan_live_check(host, api_key, *, enabled=False, visibility='private', public_ips=None, attempts=5, delay=4):
+    """Explicit opt-in submission; private by default, no automatic switch to public."""
+    if not enabled:
+        return source('skipped', summary='默认不提交实时网站扫描（需明确使用 --live-scan）')
+    if not api_key:
+        return source('not_configured', summary='实时网站扫描需先配置 urlscan.io API Key')
+    if visibility not in ('private','unlisted','public'):
+        return source('error', error='无效扫描可见性')
+    if not public_ips:
+        return source('skipped', summary='DNS 未确认公网地址，不提交实时网站扫描')
+    # The scan URL is constructed ONLY from the validated FQDN, never a user-provided URL.
+    scan_url = 'https://' + host + '/'
+    try:
+        response = requests.post(URLSCAN_SUBMIT, headers={'api-key': api_key, 'Content-Type':'application/json',
+                                  'User-Agent':UA}, json={'url':scan_url, 'visibility':visibility},
+                                 timeout=12, allow_redirects=False)
+        response.raise_for_status()
+        if response.status_code >= 300:
+            raise requests.HTTPError('urlscan 提交出现重定向，已拒绝')
+        doc = response.json()
+        scan_id = str(doc.get('uuid') or '')
+        if not UUID_PATTERN.fullmatch(scan_id):
+            raise ValueError('urlscan 未返回有效扫描 ID')
+        link = 'https://urlscan.io/result/' + scan_id + '/'
+        for i in range(max(0, min(int(attempts), 8))):
+            if i or delay:
+                time.sleep(max(0, min(float(delay), 8)))
+            try:
+                detail = urlscan_fetch_detail(scan_id, api_key, host)
+                return source('ok', summary='经明确请求已完成实时远程网页扫描，结果可查看；这不是本机直接扫描',
+                              data={'submission_status':'complete', 'visibility':visibility,
+                                    'scan_url':scan_url, 'result':detail}, url=link)
+            except requests.HTTPError as exc:
+                if exc.response is None or exc.response.status_code != 404:
+                    break
+            except (requests.RequestException, ValueError):
+                break
+        return source('partial', summary='已提交实时扫描，尚未取得完整结果；请稍后查看 urlscan 链接',
+                      data={'submission_status':'pending', 'visibility':visibility,
+                            'scan_url':scan_url, 'scan_id':scan_id}, url=link)
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        return source('error', summary='实时扫描提交失败，可能受账号配额或可见性权限限制；不会自动切换到公开模式',
+                      error=exc, url='https://urlscan.io/docs/api/')
 
 
 def effective_vt_usage(env, ctx=None):
@@ -430,6 +567,7 @@ def evidence_ledger(report):
         'virustotal': ('VirusTotal', '第三方检测统计，不等于恶意定性；某些用途自动跳过', 'last_analysis_date'),
         'tls': ('可选 TLS 探测', '仅在明确授权时可做的实时目标连接', None),
         'local_ioc': ('开源本地安全名单', '离线匹配公开名单；域名精确匹配与共享 IP 弱关联不同，广告追踪不等于恶意', None),
+        'urlscan_live': ('urlscan 可选实时扫描', '用户明确选择时才提交，可能暴露所访问的 URL；不会自动公开', None),
     }
     ledger = []
     status_counts = {k: 0 for k in ('ok', 'empty', 'error', 'not_configured', 'skipped')}
@@ -550,7 +688,19 @@ def evaluate(report):
         pending.append('VirusTotal 数据不可用')
     # vt.status=skipped 且因为某些用途限制时，是合规跳过而不是技术无风险。
     us = src['urlscan']
-    if us['status'] == 'ok':
+    live = src.get('urlscan_live') or {}
+    if live.get('status') == 'ok' and ((live.get('data') or {}).get('result') or {}).get('urlscan_malicious') is True:
+        findings.append({'severity':'medium', 'type':'urlscan_live_malicious', 'confidence':'medium',
+                         'evidence_ids':ids('urlscan_live'),
+                         'detail':'本次可选实时网页扫描被 urlscan 标为恶意，需核实具体页面和相关证据'})
+    if us['status'] == 'partial':
+        pending.append('urlscan 部分历史扫描详情未能获取，结果不完整')
+    if us['status'] in ('ok','partial'):
+        flagged = [x for x in us['data'].get('results', []) if x.get('urlscan_malicious') is True]
+        if flagged:
+            findings.append({'severity':'medium','type':'urlscan_historical_malicious', 'confidence':'medium',
+                             'evidence_ids':ids('urlscan'),
+                             'detail': f'urlscan 历史记录中 {len(flagged)} 条被标记为恶意，请核实历史页面和误报；不能证明当前恶意'})
         redirects = [x for x in us['data'].get('results', [])
                      if x.get('redirected') == 'off-domain'
                      or (x.get('result_page_host') and x.get('task_url_host')
@@ -654,6 +804,7 @@ def technical_assessment(report):
 
 def auto_refresh_local_ioc(db, max_age_days=7):
     """Update approved default feeds only when missing/stale, without target disclosure."""
+    local_ioc.seed_bundled_feeds(db=db)
     now = datetime.now(timezone.utc)
     rows = {r['feed']: r for r in local_ioc.list_feeds(db=db)}
     due = []
@@ -713,7 +864,7 @@ def render_markdown(report):
     return '\n'.join(lines) + '\n'
 
 
-def build_report(host, registered, ctx, tls_probe=False, env=None, ioc_db=None):
+def build_report(host, registered, ctx, tls_probe=False, env=None, ioc_db=None, history_limit=URLSCAN_HISTORY_DEFAULT, live_scan=False, live_visibility="private"):
     env = env if env is not None else read_env()
     d = dns_check(host, registered)
     r = rdap_check(registered)
@@ -722,14 +873,16 @@ def build_report(host, registered, ctx, tls_probe=False, env=None, ioc_db=None):
     sources = {
         'rdap': r, 'dns': d, 'ripestat': ripestat_check(ips),
         'crtsh': crt_check(registered),
-        'urlscan': urlscan_check(host, env.get('URLSCAN_API_KEY', '')),
+        'urlscan': urlscan_check(host, env.get('URLSCAN_API_KEY', ''), max_scans=history_limit),
         'virustotal': vt_check(host, env.get('VT_API_KEY', ''), vt_usage),
         'local_ioc': local_ioc.inspect_cached(host, [x['ip'] for x in ips if x.get('globally_routable')],
                                               db=ioc_db or local_ioc.DEFAULT_DB),
         'tls': tls_check(host, int(ctx.get('target_port') or 443), ips, tls_probe),
+        'urlscan_live': urlscan_live_check(host, env.get('URLSCAN_API_KEY', ''), enabled=live_scan,
+                                          visibility=live_visibility, public_ips=[v['ip'] for v in ips if v['globally_routable']]),
     }
     instant = datetime.now(timezone.utc)
-    report = {'schema_version': '1.9.0',
+    report = {'schema_version': '2.1.0',
               'report_id': 'EDA-' + instant.strftime('%Y%m%dT%H%M%SZ') + '-' + re.sub(r'[^a-z0-9]+', '-', host)[:48],
               'checked_at': instant.isoformat(timespec='seconds'), 'domain': host,
               'registered_domain': registered, 'vt_usage': vt_usage,
@@ -880,9 +1033,12 @@ def audit_cmd(args):
         print('首次使用，先配置免费的威胁情报 API。')
         init_cmd(argparse.Namespace(force=False, non_interactive=False))
     ctx, _ = read_context(args.business_file, host)
-    if args.tls_probe:
-        print('提示：已选择主动 TLS 探测，会与公网目标建立连接（不发送 HTTP 请求）。')
+    tls_probe = not getattr(args, 'no_tls_probe', False)
+    if tls_probe:
+        print('TLS：默认检查目标公网 IP:443（SNI 证书验证，不发送 HTTP 请求；可使用 --no-tls-probe 关闭）。')
     usage = effective_vt_usage(read_env(), ctx)
+    if getattr(args, 'live_scan', False):
+        print(f'按用户选择将向 urlscan.io 提交 https://{host}/ 的实时扫描，可见性：{args.live_visibility}。')
     print(f'正在检查 {host}，检查完成后会生成易读的 HTML 报告。')
     db = getattr(args, 'ioc_db', str(local_ioc.DEFAULT_DB))
     if getattr(args, 'no_auto_ioc_update', False):
@@ -894,7 +1050,10 @@ def audit_cmd(args):
             sync = {'status': 'error', 'checked_at': utc_now(), 'errors': {'local_ioc': str(exc)[:200]}, 'target_sent': False}
     if sync['status'] in ('partial', 'error'):
         print('本地 IOC 名单更新不完整：保留历史缓存，并在报告中说明；继续其他检查。')
-    report = build_report(host, registered, ctx, args.tls_probe, ioc_db=db)
+    report = build_report(host, registered, ctx, tls_probe, ioc_db=db,
+                          history_limit=getattr(args, 'history_limit', URLSCAN_HISTORY_DEFAULT),
+                          live_scan=getattr(args,'live_scan',False),
+                          live_visibility=getattr(args,'live_visibility','private'))
     out = Path(args.output).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     previous, baseline_path = (None, None)
@@ -934,9 +1093,9 @@ def audit_cmd(args):
 
 
 def ioc_update_cmd(args):
-    names = list(local_ioc.FEEDS) if args.include_adtracking else [name for name, cfg in local_ioc.FEEDS.items() if cfg['enabled_by_default']]
-    if args.include_adtracking and not args.license_reviewed:
-        raise ValueError('anti-AD 为上游聚合列表，请先核实特定用途与上游数据许可；确认后同时使用 --license-reviewed')
+    names = [name for name, cfg in local_ioc.FEEDS.items() if cfg['enabled_by_default']]
+    if getattr(args, 'exclude_adtracking', False):
+        names = [name for name in names if name != 'cn_antiad']
     print('仅获取开源静态数据，不上传申请域名/IP；不会自动封禁。')
     results = local_ioc.update_feeds(db=args.ioc_db, names=names)
     for key, value in results.items():
@@ -948,8 +1107,6 @@ def ioc_update_cmd(args):
 def ioc_import_cmd(args):
     if args.feed not in local_ioc.FEEDS:
         raise ValueError('非允许的数据源')
-    if args.feed == 'cn_antiad' and not args.license_reviewed:
-        raise ValueError('导入 anti-AD 需先审核聚合上游数据许可并设置 --license-reviewed')
     p = Path(args.file).expanduser().resolve()
     if not p.is_file() or p.stat().st_size > local_ioc.MAX_BYTES:
         raise ValueError('源文件不存在或超出安全大小限制')
@@ -964,7 +1121,7 @@ def ioc_import_cmd(args):
 def ioc_status_cmd(args):
     rows = local_ioc.list_feeds(db=args.ioc_db)
     if not rows:
-        print('尚无本地 IOC 数据库或未成功更新。请执行 ioc-update。')
+        print('尚无本地 IOC 数据库或快照；请执行 ioc-update。')
         return 0
     for row in rows:
         print(f"{row['feed']}: {row['item_count']} 条 | 更新 {row['updated_at']} | SHA256 {row['sha256']} | {row['license']}")
@@ -998,18 +1155,23 @@ def main(argv=None):
     s_audit.add_argument('--output', default=str(ROOT / 'reports'), help='HTML 与 JSON 报告保存位置')
     s_audit.add_argument('--markdown', action='store_true', help='额外生成旧版 Markdown 技术报告')
     s_audit.add_argument('--no-prompt', action='store_true', help='不弹出首次 API 配置向导，适用于自动化任务')
-    s_audit.add_argument('--tls-probe', action='store_true', help='主动连接目标公网 IP 测试 TLS（默认禁用）')
+    s_audit.add_argument('--tls-probe', action='store_true', help='兼容旧版参数；TLS 默认开启')
+    s_audit.add_argument('--no-tls-probe', action='store_true', help='关闭默认 TLS 实时连接（仅被动查询）')
+    s_audit.add_argument('--history-limit', type=int, choices=range(1, 51), metavar='1-50', default=15, help='默认分析最多 15 条历史扫描的详细结果；最多 50 条，受账号配额限制')
+    s_audit.add_argument('--live-scan', action='store_true', help='明确同意通过 urlscan.io 远程扫描目标网站，默认不提交')
+    s_audit.add_argument('--live-visibility', choices=['private','unlisted','public'], default='private', help='远程扫描结果可见性，默认 private，不自动降低隐私等级')
     s_audit.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB), help='本地安全名单 SQLite 路径')
     s_audit.add_argument('--no-auto-ioc-update', action='store_true', help='禁用自动更新，仍使用现有本地缓存')
     s_ioc_update = sub.add_parser('ioc-update', help='更新免费开源 IOC 名单；不发送被检测域名')
     s_ioc_update.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB))
-    s_ioc_update.add_argument('--include-adtracking', action='store_true', help='可选安装 anti-AD，仅用于广告/跟踪线索')
-    s_ioc_update.add_argument('--license-reviewed', action='store_true', help='确认已核实 anti-AD 聚合上游数据许可')
+    s_ioc_update.add_argument('--include-adtracking', action='store_true', help='兼容旧版参数；anti-AD 默认启用')
+    s_ioc_update.add_argument('--exclude-adtracking', action='store_true', help='可选跳过 anti-AD 下载')
+    s_ioc_update.add_argument('--license-reviewed', action='store_true', help='兼容旧版参数；请自行查看数据来源及许可证')
     s_ioc_import = sub.add_parser('ioc-import', help='从本地文件导入公开 IOC 清单')
     s_ioc_import.add_argument('--feed', choices=list(local_ioc.FEEDS), required=True)
     s_ioc_import.add_argument('--file', required=True)
     s_ioc_import.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB))
-    s_ioc_import.add_argument('--license-reviewed', action='store_true')
+    s_ioc_import.add_argument('--license-reviewed', action='store_true', help='兼容旧版参数')
     s_ioc_status = sub.add_parser('ioc-status', help='查看规则库版本与更新时间')
     s_ioc_status.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB))
     s_ioc_check = sub.add_parser('ioc-check', help='使用本地 IOC 数据库离线检查')

@@ -19,6 +19,7 @@ import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = ROOT / 'data' / 'ioc_rules.sqlite3'
+VENDOR_DIR = ROOT / 'vendor' / 'ioc'
 MAX_BYTES = 16 * 1024 * 1024
 MAX_AGE_DAYS = 7
 
@@ -47,7 +48,7 @@ FEEDS = {
         'project': 'https://github.com/privacy-protection-tools/anti-AD',
         'license': '仓库 MIT；聚合上游许可需要机构额外核实',
         'kind': 'ad_tracking', 'format': 'plain_domain',
-        'min_count': 1000, 'enabled_by_default': False, 'origin_group': 'antiad_aggregated',
+        'min_count': 1000, 'enabled_by_default': True, 'origin_group': 'antiad_aggregated',
     },
 }
 
@@ -175,6 +176,58 @@ def update_feeds(db=DEFAULT_DB, *, names=None, fetcher=None):
     return result
 
 
+
+def seed_bundled_feeds(db=DEFAULT_DB, names=None):
+    """Seed the SQLite cache from vendored *original* feed files.
+
+    Never implies the snapshot was observed today: generated_at is retained.
+    Missing/invalid snapshots remain unavailable, never silent clean results.
+    """
+    manifest_path = VENDOR_DIR / 'manifest.json'
+    if not manifest_path.is_file():
+        return {}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    except (ValueError, OSError, UnicodeError):
+        return {}
+    selected = set(names or FEEDS)
+    output = {}
+    current = {row['feed'] for row in list_feeds(db)}
+    for feed, meta in (manifest.get('feeds') or {}).items():
+        if feed not in FEEDS or feed not in selected or feed in current:
+            continue
+        expected_filename = {'cn_phishshield': 'phishshield_blacklist.js',
+                             'cn_ipguard': 'ipguard_blacklist.txt',
+                             'cn_antiad': 'anti_ad_domains.txt'}.get(feed)
+        if not expected_filename or meta.get('file') != expected_filename:
+            output[feed] = {'status': 'invalid_manifest'}
+            continue
+        f = VENDOR_DIR / expected_filename
+        try:
+            payload = f.read_bytes()
+            if not 10 <= len(payload) <= MAX_BYTES or sha256(payload).hexdigest() != meta.get('sha256'):
+                raise ValueError('快照大小或 SHA256 校验失败')
+            entries = parse_text(feed, payload.decode('utf-8-sig'))
+            if len(entries) < FEEDS[feed]['min_count']:
+                raise ValueError('快照格式异常或数据不足')
+            from datetime import timedelta
+            checked = datetime.fromisoformat(str(manifest.get('generated_at','')).replace('Z','+00:00'))
+            if checked.tzinfo is None or checked > datetime.now(timezone.utc) + timedelta(days=1):
+                raise ValueError('快照日期无效')
+            created_at = checked.isoformat(timespec='seconds')
+            cfg = FEEDS[feed]
+            with connect(db) as c:
+                c.execute('DELETE FROM indicators WHERE feed=?', (feed,))
+                c.executemany('INSERT INTO indicators(feed,indicator,details) VALUES(?,?,?)',
+                              ((feed, val, note) for val, note in entries))
+                c.execute('INSERT OR REPLACE INTO feed_meta(feed,updated_at,source_url,project_url,license,sha256,item_count) VALUES(?,?,?,?,?,?,?)',
+                          (feed, created_at, cfg['url'], cfg['project'], cfg['license'], meta['sha256'], len(entries)))
+            output[feed] = {'status':'seeded', 'count': len(entries), 'snapshot_at': created_at}
+        except (OSError, ValueError, UnicodeError, sqlite3.Error) as exc:
+            output[feed] = {'status':'error','error':str(exc)[:160]}
+    return output
+
+
 def list_feeds(db=DEFAULT_DB):
     if not Path(db).is_file():
         return []
@@ -228,7 +281,7 @@ def inspect_cached(host, ips, db=DEFAULT_DB, max_age_days=MAX_AGE_DAYS):
             'data': {'matched': matches, 'feeds': feeds,
                      'eligible_feeds': sum(not f['stale'] for f in feeds),
                      'assessment': 'local_matches_need_review', 'target_not_uploaded': True,
-                     'license_warning': '仓库许可不自动覆盖聚合上游许可，使用者须复核名单及上游数据再利用条件'}}
+                     'license_warning': '已注明项目和原始来源；聚合数据许可不能由仓库 MIT 单独代表，使用时请核对具体上游授权'}}
 
 
 def _valid_ip(value):

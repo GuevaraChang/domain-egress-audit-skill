@@ -29,3 +29,9 @@ python scripts/domain_audit.py doctor
 python scripts/domain_audit.py doctor --online
 python scripts/domain_audit.py audit --domain example.com
 ```
+
+## urlscan 历史扫描详细分析
+
+配置 `URLSCAN_API_KEY` 后，`audit` 默认先调用 `/api/v1/search/` 搜索已存在的记录，再用每条扫描的 UUID 调用 `/api/v1/result/{uuid}/` 读取扫描详情（默认最多 15 条；最多 50 条）。每条详细结果会消耗一次 Result API 配额；遇到 429 停止继续查询并报告“部分完成”，不要无限重试。
+
+远程实时扫描是单独的 `--live-scan` 选项，默认**不启用**。默认提交可见性为 `private`，该权限可能不在免费套餐中；如果不支持则应告知用户，不自动改为 Public。官方文档：https://urlscan.io/docs/api/ 。

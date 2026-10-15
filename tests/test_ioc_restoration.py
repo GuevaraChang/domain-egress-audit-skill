@@ -15,19 +15,19 @@ class RestoreLocalIOC(unittest.TestCase):
     def test_default_feeds_preserved_without_vendor_keys(self):
         self.assertEqual(set(local_ioc.FEEDS), {'cn_phishshield','cn_ipguard','cn_antiad'})
         self.assertEqual({k for k,v in local_ioc.FEEDS.items() if v['enabled_by_default']},
-                         {'cn_phishshield','cn_ipguard'})
+                         {'cn_phishshield','cn_ipguard','cn_antiad'})
         self.assertEqual(set(a.CREDENTIAL_NAMES), {'URLSCAN_API_KEY','VT_API_KEY'})
     def test_missing_cache_refresh_automatically(self):
         with patch.object(local_ioc,'list_feeds',return_value=[]), \
              patch.object(local_ioc,'update_feeds',return_value={
-                'cn_phishshield':{'status':'ok'},'cn_ipguard':{'status':'ok'}}) as update:
+                'cn_phishshield':{'status':'ok'},'cn_ipguard':{'status':'ok'},'cn_antiad':{'status':'ok'}}) as update:
             result = a.auto_refresh_local_ioc('/temp/noactual.db')
         self.assertEqual(result['status'],'updated')
         self.assertFalse(result['target_sent'])
-        self.assertEqual(set(update.call_args.kwargs['names']),{'cn_phishshield','cn_ipguard'})
+        self.assertEqual(set(update.call_args.kwargs['names']),{'cn_phishshield','cn_ipguard','cn_antiad'})
     def test_fresh_cache_does_not_redownload(self):
         today = a.utc_now()
-        rows=[{'feed':x,'updated_at':today} for x in ('cn_phishshield','cn_ipguard')]
+        rows=[{'feed':x,'updated_at':today} for x in ('cn_phishshield','cn_ipguard','cn_antiad')]
         with patch.object(local_ioc,'list_feeds',return_value=rows), \
              patch.object(local_ioc,'update_feeds') as update:
             result=a.auto_refresh_local_ioc('/temp/noactual.db')

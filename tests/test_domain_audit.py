@@ -87,15 +87,15 @@ class TestDomainAudit(unittest.TestCase):
         fake = {'results': [
             {'page': {'domain': 'login.example.net', 'redirected': 'off-domain', 'url': 'https://login.example.net'},
              'task': {'domain': 'example.com', 'time': '2026-10-10T10:00:00Z'},
-             'result': 'https://urlscan.io/result/mock/'},
+             'result': 'https://urlscan.io/result/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/', '_id':'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'},
             {'page': {'domain': 'unrelated.test'}, 'task': {'domain': 'unrelated.test'}},
         ]}
-        with patch.object(audit, 'req_json', return_value=fake) as mock:
+        with patch.object(audit, 'req_json', side_effect=[fake, {'task':{'domain':'example.com','url':'https://example.com/','time':'2026-10-10T10:00:00Z'}, 'page':{'url':'https://login.example.net/','domain':'login.example.net','redirected':'off-domain'}}]) as mock:
             result = audit.urlscan_check('example.com', 'test-key')
         self.assertEqual(result['status'], 'ok')
         self.assertEqual(result['data']['matched_results'], 1)
         self.assertEqual(result['data']['results'][0]['redirected'], 'off-domain')
-        self.assertIn('task.domain.keyword', mock.call_args.kwargs['params']['q'])
+        self.assertIn('task.domain.keyword', mock.call_args_list[0].kwargs['params']['q'])
 
     def test_outbound_api_does_not_follow_redirects(self):
         fake = unittest.mock.Mock()
@@ -306,8 +306,8 @@ class TestDomainAudit(unittest.TestCase):
              patch.object(audit, 'tls_check', return_value=audit.source('skipped')), \
              patch.object(audit.local_ioc, 'inspect_cached', return_value=audit.source('not_configured')):
             report = audit.build_report('example.com', 'example.com', {'usage_type': 'business'}, env={})
-        self.assertEqual(report['schema_version'], '1.9.0')
-        self.assertEqual(len(report['evidence_ledger']), 8)
+        self.assertEqual(report['schema_version'], '2.1.0')
+        self.assertEqual(len(report['evidence_ledger']), 9)
         self.assertIn('cdn.vendor.com', [x['hostname'] for x in report['asset_inventory']])
         md = audit.render_markdown(report)
         self.assertIn('已检查与未检查', md)

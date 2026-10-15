@@ -20,7 +20,7 @@ spec.loader.exec_module(a)
 class ChatKeyConfigTests(unittest.TestCase):
     def test_only_two_optional_credentials_supported(self):
         self.assertEqual(set(a.CREDENTIAL_NAMES), {'URLSCAN_API_KEY','VT_API_KEY'})
-        self.assertEqual(len(a.report_html.SOURCE_NAMES), 8)
+        self.assertEqual(len(a.report_html.SOURCE_NAMES), 9)
         for removed in ('OLD_API_KEY','UNSUPPORTED_API_KEY'):
             self.assertNotIn(removed, a.CONFIG_NAMES)
 

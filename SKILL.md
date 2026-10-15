@@ -3,15 +3,15 @@ name: domain-egress-audit
 description: 通过公开数据源检查域名是否存在安全风险。首次主动引导配置可选免费 API，可由具备本地文件权限的 Agent 在会话接收 API Key 安全写入 .env；自动生成容易理解的 HTML 安全报告。
 ---
 
-# Domain Safety Check Skill · v1.9
+# Domain Safety Check Skill · v2.1
 
 ## 适用范围与原则
 
 当用户说“检查 example.com 是否安全”，自动执行公开情报校验并交付**简明 HTML 报告**。不需要用户创建 `business_context.json`。支持首次使用时引导申请可选 API，之后只需域名。不可宣称绝对安全或擅自修改网络策略。
 
-默认使用：无需密钥的 **DNS / RDAP / RIPEstat / crt.sh**、**PhishShield / IPGuard 开源静态安全名单**，以及可选的 **urlscan.io / VirusTotal**。**anti-AD** 作为广告追踪信息来源，需要用户确认聚合许可后才能选择启用，不参与恶意 IOC 定性。无须注册开源名单的 API；不使用其他第三方情报厂商 API，不要求人工提交情报文件。
+默认使用：无需密钥的 **DNS / RDAP / RIPEstat / crt.sh**、**PhishShield / IPGuard 开源静态安全名单**，以及可选的 **urlscan.io / VirusTotal**。**anti-AD** 默认作为广告追踪辅助线索（不得当作恶意 IOC 定性），使用者应核对聚合上游的许可，不参与恶意 IOC 定性。无须注册开源名单的 API；不使用其他第三方情报厂商 API，不要求人工提交情报文件。
 
-- 默认仅被动查询第三方现有记录，**不主动访问目标站点**；仅用户明确同意 `--tls-probe` 才建立 TLS 连接，不发送 HTTP 请求。
+- 默认读取第三方已有历史扫描详细结果，同时自动进行 TLS 握手检查（不发送 HTTP 请求）。远程实时网页扫描始终关闭，只有明确选择 `--live-scan` 才会由 urlscan 平台提交新扫描。
 - 仅提交目标公开 FQDN；不要查询内部域名、包含密码或 Token 的 URL。
 - API 缺失、接口超额、网络错误必须单独标明“未检查”，不能视为安全。
 - VirusTotal 免费 Public API 有官方许可限制。仅用户确认具备适用授权时开启；否则不调用。
@@ -43,7 +43,7 @@ pip install -r requirements.txt
 python scripts/domain_audit.py audit --domain example.com
 ```
 
-交互式终端首次执行会主动提示配置 API；无人值守加 `--no-prompt`。自动检查格式、当前 DNS、域名注册信息、IP 归属、证书透明度历史、PhishShield/IPGuard 本地 IOC（自动更新或读取缓存）、已配置的 API，以及最近同域名的历史快照。无需额外 JSON 或人工输入。
+交互式终端首次执行会主动提示配置 API；无人值守加 `--no-prompt`。自动检查格式、当前 DNS、域名注册信息、IP 归属、证书透明度历史、PhishShield/IPGuard/anti-AD 本地 IOC、urlscan 历史扫描详情（默认最多 15 条）、已配置的 API、默认 TLS 握手，以及最近同域名的历史快照。无需额外 JSON 或人工输入。
 
 ## 第三步：HTML 结果
 
@@ -52,3 +52,10 @@ python scripts/domain_audit.py audit --domain example.com
 `未发现明显风险` 只指本次成功完成的检测；未配置域名信誉源时应报告信息不足，不能根据注册年限或证书存在便断言安全。不要将检测结论用作自动放行指令。
 
 参见 [API 配置指南](references/SERVICE_SETUP.md)、[风险判断规则](references/RISK_RULES.md)、[本地开源 IOC 数据源](references/LOCAL_IOC.md)。
+
+## 历史网站扫描和实时网站扫描的边界
+
+- 默认：读取 urlscan 已有的历史 Search 结果，再逐条获取 Result JSON；提取历史截图链接、页面标题、最终域名、历史 IP、请求量、第三方资源域名、历史威胁标记。默认 15 条，`--history-limit 1..50` 可调整，受额度限制；不要宣称已覆盖全网全部历史。
+- 无 API Key、无历史记录、单条详情失败或 429 限额，必须明确标示“未检查 / 未找到 / 部分完成”，不得报告为安全。
+- 实时网页扫描默认**禁止提交**。仅显式 `--live-scan` 开启；默认 `private`，如权限不足不降级公开。用户自行确认域名公开可扫描、没有敏感路径或数据后才可使用。
+- `--no-tls-probe` 仅关闭默认 TLS 握手；它与 urlscan 远程实时网页扫描是两种不同功能。

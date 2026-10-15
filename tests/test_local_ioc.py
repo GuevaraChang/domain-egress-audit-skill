@@ -38,7 +38,7 @@ class LocalIOC(unittest.TestCase):
 
     def test_default_update_and_fqdn_ip_and_no_subdomain_widening(self):
         results = local_ioc.update_feeds(self.db, fetcher=self.static_fetcher)
-        self.assertEqual(set(results), {'cn_phishshield','cn_ipguard'})
+        self.assertEqual(set(results), {'cn_phishshield','cn_ipguard','cn_antiad'})
         self.assertTrue(all(v['status']=='ok' for v in results.values()))
         found = local_ioc.inspect_cached('bad.example.net', ['8.8.8.8','10.0.0.1'], self.db)
         self.assertEqual(found['status'], 'ok')
@@ -90,7 +90,7 @@ class LocalIOC(unittest.TestCase):
     def test_local_intel_is_independent_from_removed_vendors(self):
         local_ioc.update_feeds(self.db, fetcher=self.static_fetcher)
         hit = local_ioc.inspect_cached('bad.example.net', ['8.8.8.8'], self.db)
-        self.assertEqual(hit['data']['eligible_feeds'], 2)
+        self.assertEqual(hit['data']['eligible_feeds'], 3)
         self.assertEqual({x['feed'] for x in hit['data']['matched']},
                          {'cn_ipguard', 'cn_phishshield'})
         src = {k:audit.source('skipped') for k in ('rdap','dns','ripestat','crtsh','urlscan','virustotal','tls')}
@@ -123,10 +123,9 @@ class LocalIOC(unittest.TestCase):
         result = local_ioc.inspect_cached('example.com',['8.8.8.8'],self.db)
         self.assertEqual(result['data']['matched'][0]['details'],'honeypot sample')
 
-    def test_adtracking_cli_license_guard(self):
-        from argparse import Namespace
-        with self.assertRaises(ValueError):
-            audit.ioc_update_cmd(Namespace(ioc_db=self.db,include_adtracking=True,license_reviewed=False))
+    def test_antiad_default_enabled(self):
+        self.assertTrue(local_ioc.FEEDS['cn_antiad']['enabled_by_default'])
+        self.assertIn('cn_antiad', local_ioc.update_feeds(self.db, fetcher=self.static_fetcher))
 
 if __name__ == '__main__':
     unittest.main()
