@@ -49,7 +49,7 @@ class TestDomainAudit(unittest.TestCase):
             'ripestat': audit.source('ok'),
         }
         result = audit.evaluate({'sources': sources, 'business_context': {}})
-        self.assertIn('风险信号', result['risk_label'])
+        self.assertIn('可疑', result['risk_label'])
         self.assertEqual(result['findings'][0]['type'], 'otx_pulse')
         self.assertNotIn('高风险', result['risk_label'])
 
@@ -117,20 +117,18 @@ class TestDomainAudit(unittest.TestCase):
                   'registered_domain': 'example.com', 'business_context': {}, 'sources': sources}
         report['assessment'] = audit.evaluate(report)
         md = audit.render_markdown(report)
-        self.assertIn('互联网外联域名安全评估报告', md)
-        self.assertIn('无人值守执行记录', md)
-        self.assertIn('准入建议', md)
+        self.assertIn('域名安全检查报告', md)
+        self.assertIn('已检查与未检查', md)
+        self.assertIn('最终建议', md)
         self.assertNotIn('自动批准：是', md)
 
 
-    def test_virustotal_commercial_skips_even_with_key(self):
+    def test_virustotal_requires_explicit_permission_even_with_key(self):
         with patch.object(audit, 'req_json') as mocked:
-            result = audit.vt_check('example.com', 'should-never-be-sent', 'business')
+            result = audit.vt_check('example.com', 'hidden-key', 'not_enabled')
         mocked.assert_not_called()
         self.assertEqual(result['status'], 'skipped')
-        self.assertEqual(result['data']['skip_reason'], 'commercial_use_restriction')
-        self.assertFalse(result['data']['api_called'])
-        self.assertIn('业务工作流', result['summary'])
+        self.assertEqual(result['data']['skip_reason'], 'permission_not_confirmed')
 
     def test_virustotal_noncommercial_no_key(self):
         with patch.object(audit, 'req_json') as mocked:
@@ -157,12 +155,12 @@ class TestDomainAudit(unittest.TestCase):
         self.assertEqual(result['status'], 'error')
         self.assertNotIn('last_analysis_stats', result['data'])
 
-    def test_vt_usage_fails_closed_on_unset_or_invalid(self):
-        self.assertEqual(audit.effective_vt_usage({}), 'business')
-        self.assertEqual(audit.effective_vt_usage({'VT_USAGE':'unexpected'}), 'business')
+    def test_vt_license_permission_gate(self):
+        self.assertEqual(audit.effective_vt_usage({}), 'not_enabled')
+        self.assertEqual(audit.effective_vt_usage({'VT_USAGE':'unexpected'}), 'not_enabled')
         self.assertEqual(audit.effective_vt_usage({'VT_USAGE':'noncommercial'}), 'noncommercial')
-        self.assertEqual(audit.effective_vt_usage({'VT_USAGE':'noncommercial'}, {'usage_type':'business'}), 'business')
-        self.assertEqual(audit.effective_vt_usage({'VT_USAGE':'noncommercial'}, {'usage_type':'enterprise'}), 'business')
+        self.assertEqual(audit.effective_vt_usage({'VT_API_TIER':'premium'}), 'licensed')
+        self.assertEqual(audit.effective_vt_usage({'VT_USAGE':'noncommercial'}, {'usage_type':'business'}), 'noncommercial')
 
     def test_vt_detection_is_review_signal_not_confirmed_malicious(self):
         sources = {k: audit.source('skipped') for k in (
@@ -175,9 +173,9 @@ class TestDomainAudit(unittest.TestCase):
         self.assertNotIn('高风险', result['risk_label'])
         self.assertFalse(result['automatic_approval'])
 
-    def test_doctor_business_no_vt_network_request_even_with_key(self):
+    def test_doctor_no_vt_request_without_permission(self):
         args=Namespace(online=True)
-        env={'VT_USAGE':'business','VT_API_KEY':'unused-key'}
+        env={'VT_API_KEY':'unused-key'}
         def public_response(url, **kwargs):
             self.assertNotIn('virustotal', url)
             return {'services':[1], 'status':'ok'}
@@ -185,46 +183,39 @@ class TestDomainAudit(unittest.TestCase):
              patch.object(audit, 'req_json', side_effect=public_response) as mocked, \
              contextlib.redirect_stdout(io.StringIO()) as buf:
             self.assertEqual(audit.doctor_cmd(args), 0)
-        self.assertIn('自动跳过', buf.getvalue())
+        self.assertIn('未启用', buf.getvalue())
         self.assertEqual(mocked.call_count, 2)
 
-    def test_init_noninteractive_business_defaults_safe(self):
+    def test_setup_noninteractive_preserves_empty_credentials(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d)/'.env'
             with patch.object(audit, 'DEFAULT_ENV', path), \
-                 contextlib.redirect_stdout(io.StringIO()) as buf:
-                self.assertEqual(audit.init_cmd(Namespace(usage=None,non_interactive=True,force=False)), 0)
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(audit.init_cmd(Namespace(non_interactive=True,force=False)),0)
             config=path.read_text(encoding='utf-8')
-        self.assertIn('VT_USAGE=business',config)
-        self.assertIn('VT_API_KEY=\n',config)
-        self.assertIn('自动跳过 VirusTotal',buf.getvalue())
+        self.assertIn('ONBOARDING_DONE=no',config)
+        self.assertNotIn('VT_USAGE=noncommercial',config)
+        self.assertNotIn('VT_API_KEY=test',config)
 
-    def test_init_noncommercial_explicit_opt_in(self):
+    def test_setup_interactive_confirmed_vt_permission(self):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/'.env'
             with patch.object(audit, 'DEFAULT_ENV', path), \
+                 patch.object(audit.sys.stdin,'isatty',return_value=True), \
+                 patch('builtins.input', side_effect=['y','1','n']), \
+                 patch.object(audit.getpass,'getpass',side_effect=['','', 'vt-secret']), \
                  contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(audit.init_cmd(Namespace(usage='noncommercial',non_interactive=True,force=False)), 0)
+                self.assertEqual(audit.init_cmd(Namespace(non_interactive=False,force=False)),0)
             config=path.read_text(encoding='utf-8')
         self.assertIn('VT_USAGE=noncommercial',config)
+        self.assertIn('ONBOARDING_DONE=yes',config)
+        self.assertIn('VT_API_KEY=vt-secret',config)
 
-    def test_build_report_business_context_overrides_noncommercial_config(self):
-        mock_dns=audit.source('ok', data={'ips':[], 'records':{}})
-        with patch.object(audit, 'dns_check', return_value=mock_dns), \
-             patch.object(audit, 'rdap_check', return_value=audit.source('ok')), \
-             patch.object(audit, 'ripestat_check', return_value=audit.source('skipped')), \
-             patch.object(audit, 'crt_check', return_value=audit.source('skipped')), \
-             patch.object(audit, 'otx_check', return_value=audit.source('skipped')), \
-             patch.object(audit, 'urlscan_check', return_value=audit.source('skipped')), \
-             patch.object(audit, 'tls_check', return_value=audit.source('skipped')), \
-             patch.object(audit, 'req_json') as mocked:
-            report = audit.build_report('example.com', 'example.com', {'usage_type':'business'},
-                env={'VT_USAGE':'noncommercial','VT_API_KEY':'ignored-key'})
-        mocked.assert_not_called()
-        self.assertEqual(report['vt_usage'], 'business')
-        self.assertEqual(report['sources']['virustotal']['status'], 'skipped')
-        self.assertIn('商业', audit.render_markdown(report))
-
+    def test_business_context_does_not_change_user_api_authorization(self):
+        self.assertEqual(audit.effective_vt_usage({'VT_USAGE':'noncommercial'}, {'usage_type':'business'}), 'noncommercial')
+        with patch.object(audit,'req_json',return_value={'data':{'attributes':{'last_analysis_stats':{}}}}):
+            result=audit.vt_check('example.com','authorized-key','noncommercial')
+        self.assertEqual(result['status'],'ok')
 
     def test_business_local_setting_cannot_be_overridden_by_env(self):
         with tempfile.TemporaryDirectory() as d:
@@ -234,20 +225,19 @@ class TestDomainAudit(unittest.TestCase):
                 obj=audit.read_env(path)
         self.assertEqual(obj['VT_USAGE'], 'business')
 
-    def test_init_business_interactive_does_not_request_vt_key(self):
+    def test_interactive_setup_can_skip_optional_keys(self):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/'.env'
             with patch.object(audit, 'DEFAULT_ENV', path), \
-                 patch.object(audit.sys.stdin,'isatty', return_value=True), \
-                 patch.object(audit, 'getpass') as getpass, \
+                 patch.object(audit.sys.stdin,'isatty',return_value=True), \
+                 patch('builtins.input', side_effect=['n', 'n']), \
+                 patch.object(audit.getpass, 'getpass', return_value='') as hidden, \
                  contextlib.redirect_stdout(io.StringIO()):
-                getpass.getpass.return_value=''
-                rc=audit.init_cmd(Namespace(usage='business',non_interactive=False,force=False))
+                rc=audit.init_cmd(Namespace(non_interactive=False,force=False))
             contents=path.read_text(encoding='utf-8')
-        self.assertEqual(rc, 0)
-        self.assertEqual(getpass.getpass.call_count, 2)
-        self.assertIn('VT_USAGE=business', contents)
-        self.assertIn('VT_API_KEY=\n', contents)
+        self.assertEqual(rc,0)
+        self.assertEqual(hidden.call_count,2)
+        self.assertIn('ONBOARDING_DONE=yes',contents)
 
     def test_passive_asset_inventory_never_auto_expands_related_targets(self):
         src = {k: audit.source('skipped') for k in
@@ -294,7 +284,7 @@ class TestDomainAudit(unittest.TestCase):
         audit.attach_baseline(cur, old)
         self.assertEqual(len(cur['baseline_comparison']['changes']), 3)
         self.assertEqual(cur['assessment']['findings'][0]['type'], 'baseline_change')
-        self.assertIn('暂缓放通', cur['assessment']['decision'])
+        self.assertIn('核实后再访问', cur['assessment']['decision'])
         self.assertFalse(cur['assessment']['automatic_approval'])
 
     def test_snapshot_compare_refuses_different_domain(self):
@@ -320,13 +310,13 @@ class TestDomainAudit(unittest.TestCase):
              patch.object(audit, 'urlscan_check', return_value=audit.source('not_configured')), \
              patch.object(audit, 'tls_check', return_value=audit.source('skipped')):
             report = audit.build_report('example.com', 'example.com', {'usage_type': 'business'}, env={})
-        self.assertEqual(report['schema_version'], '1.5.0')
+        self.assertEqual(report['schema_version'], '1.6.0')
         self.assertEqual(len(report['evidence_ledger']), 13)
         self.assertIn('cdn.vendor.com', [x['hostname'] for x in report['asset_inventory']])
         md = audit.render_markdown(report)
-        self.assertIn('证据可追溯性与时效', md)
-        self.assertIn('被动关系资产清单', md)
-        self.assertEqual(report['sources']['virustotal']['status'], 'skipped')
+        self.assertIn('已检查与未检查', md)
+        self.assertIn('发现的问题', md)
+        self.assertEqual(report['sources']['virustotal']['status'], 'not_configured')
 
 
     def test_domestic_manual_wrong_target_rejected(self):
@@ -460,7 +450,7 @@ class TestDomainAudit(unittest.TestCase):
         self.assertEqual(rep['sources']['qianxin_ti_manual']['status'],'not_configured')
         self.assertEqual(len(rep['evidence_ledger']),13)
         md=audit.render_markdown(rep)
-        self.assertIn('国内情报交叉验证',md)
+        self.assertIn('已检查与未检查',md)
         self.assertFalse(rep['assessment']['automatic_approval'])
 
 

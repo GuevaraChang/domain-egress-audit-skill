@@ -22,7 +22,7 @@ class Unattended(unittest.TestCase):
         self.assertEqual(ctx['target_fqdn'], 'ifuwuyun.com')
         self.assertEqual(ctx['data_classification'], 'unknown')
         self.assertNotIn('owner_verified', ctx)
-        self.assertEqual(a.effective_vt_usage({}), 'business')
+        self.assertEqual(a.effective_vt_usage({}), 'not_enabled')
         self.assertEqual(a.effective_vt_usage({'VT_USAGE':'noncommercial'},ctx), 'noncommercial')
 
     def test_auto_ioc_skips_when_both_fresh(self):
@@ -88,7 +88,7 @@ class Unattended(unittest.TestCase):
             self.assertFalse(doc['execution']['manual_input_required'])
             self.assertEqual(doc['technical_assessment']['access_authorization'],'not_granted')
             self.assertEqual(doc['execution']['ioc_refresh']['status'],'partial')
-            self.assertTrue(files[0].with_suffix('.md').exists())
+            self.assertTrue(files[0].with_suffix('.html').exists())
 
 if __name__ == '__main__':
     unittest.main()

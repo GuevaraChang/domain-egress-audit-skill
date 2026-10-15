@@ -22,7 +22,7 @@ class LocalIOC(unittest.TestCase):
         if '/IPguard/' in url:
             return b'8.8.8.8 # honeypot sample\n9.9.9.9 # second\n1.1.1.1\n4.4.4.4\n5.5.5.5\n'
         if '/phishshield/' in url:
-            s = "const PHISHING_BLACKLIST = new Set(['bad.example.net', 'phish.example.org', 'fraud.example.com', 'foo.bad.xyz', 'bar.evil.cn', 'oops.bad.info', 'fake.brand.co', 'phish.bank.xyz', 'mail.bad.link', 'scam.abc.top']);"
+            s = "const PHISHING_BLACKLIST = new Set(['bad.example.net', 'phish.example.org', 'fraud.example.com', 'foo.bad.xyz', 'bar.evil.cn', 'oops.bad.info', 'fake.brand.co', 'phish.brand.xyz', 'mail.bad.link', 'scam.abc.top']);"
             return s.encode()
         if '/anti-AD/' in url:
             return ('#TITLE=anti-AD\n' + '\n'.join(f'tracker{i}.example.com' for i in range(1002))).encode()

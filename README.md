@@ -1,162 +1,74 @@
-# Domain Egress Audit Skill · 外联域名安全评估（v1.5，一条命令无人值守评估）
+# Domain Egress Audit Skill · 免费域名安全检查
 
-一个可直接用于兼容 `SKILL.md` 的 Agent Skills / Codex / Claude 类 Agent 的 `SKILL.md`，以及可独立运行的 Python CLI。工作流：**引导免费 API 申请 → 域名只读核查 → 自动出标准化 Markdown + JSON 证据报告**。
+只需输入一个域名，就能自动收集公开安全信息，并生成一份**普通人也能看懂的 HTML 报告**。不用填写表格，不用购买商业威胁情报服务。
 
-## 快速开始：不用 business_context.json、不用 API Key
+## 直接开始
 
-运行环境：Python 3.10+。第一次安装依赖后，之后每次只需提供域名。`audit` 不询问问题，自动在合规许可范围内使用可用来源、更新缺失或超过 7 天的本地 IOC、复用已有缓存并自动与同域名历史 JSON 快照比较，生成标准化 Markdown 和 JSON 报告。
+需要 Python 3.10+：
 
 ```bash
 pip install -r requirements.txt
-python scripts/domain_audit.py audit --domain ifuwuyun.com
+python scripts/domain_audit.py audit --domain example.com
 ```
 
-运行后自动生成 `reports/ifuwuyun.com_<UTC时间>.md` 及 `.json`；CLI 不要求交互输入、人工情报记录或 `business_context.json`。不需要先执行 `init`、`ioc-update`、`doctor`。如果无法联网、公开服务错误或没有可用免费 Key，会继续执行其他检查并明确保留失败状态，不会把“未查到”当作“安全”。
+**首次在交互终端运行**时，程序会主动引导你配置可选的免费威胁情报账号和 API Key。你可以先跳过，照样获得基础检测结果；之后执行 `python scripts/domain_audit.py setup` 继续配置。密钥只保存在本地 `.env`，绝不要提交到 Git。
 
-`business_context.json` 是**可选**的单位内部外联业务资料（源服务器、用途、第三方、数据分类、是否上传数据、审批信息），无法从公开互联网域名数据自动推断；即使不提供也照常完整生成**技术评估报告**，但报告不会声称完成了业务/数据合规核验，更不会自动执行网络放通。
+检查完成后生成：
 
-### 非交互可选项
-
-```bash
-# 不在本次运行中下载/更新开源 IOC（例如已由单位定期离线同步）
-python scripts/domain_audit.py audit --domain ifuwuyun.com --no-auto-ioc-update
-# 不自动从 reports 中选择同域名上次快照
-python scripts/domain_audit.py audit --domain ifuwuyun.com --no-auto-baseline
-# 可选：补充本地业务申请事实，但不是技术评估前置依赖
-python scripts/domain_audit.py audit --domain ifuwuyun.com --business-file business_context.json
-# 可选、仅在获得第三方目标主动连接授权后执行
-python scripts/domain_audit.py audit --domain ifuwuyun.com --tls-probe
+```text
+reports/example.com_时间戳.html  ← 双击即可看结论
+reports/example.com_时间戳.json  ← 原始证据，供程序读取
 ```
 
-### 免费 API 仍然可选
+## 报告怎么看？
 
-无需注册的基本数据源：IANA RDAP、当前 DNS、RIPEstat、crt.sh、本地 IOC 开源数据。OTX/urlscan 只有在已有 Key 且许可允许时自动调用。个人确属非商业时可按 `init --usage noncommercial` 配置 VirusTotal Public API；**商业/银行用途无论是否有 Key 均强制跳过 VirusTotal 免费 Public API**。账号注册/邮箱验证不能被自动代办，但不会阻断无人值守执行。国内微步/奇安信/腾讯的**免费网页**查询不自动抓取、不伪装成已完成的 API 查询；没有合规可用 API 的来源明确显示未配置。
+结论一共有四种：**发现严重风险**（不建议访问）、**发现可疑问题**（建议先核实）、**信息不足**（关键检查未完成）、**暂未发现明显风险**（可以谨慎访问）。报告首页会展示具体问题和建议，不必阅读安全术语；技术详情默认折叠。
 
-**机器结论 ≠ 企业外联授权**：自动分析可区分“发现风险线索”“技术证据不足”“已检查来源未触发明显线索”；绝不输出“证明安全”或修改防火墙/代理策略。评估使用前应确保网络出站访问、公开情报再利用许可与数据境外查询符合本单位要求。`assets/DEMO_REPORT.md` 仅为演示样例，不是实际查询。
+[查看 HTML 演示模板](assets/DEMO_REPORT.html)。演示数据是合成的，不是对真实域名的检测结果。
 
-## 中国开源 IOC 本地规则库
+## 数据源
 
-运行 `audit` 时若未建立或超过 7 天未更新，会**自动拉取默认允许的 IOC 静态规则**；不会将被评估域名发送给这些项目。静态文件来自中国社区 GitHub 项目，并非微步/奇安信/腾讯的官方接口，也不是 DomainTools。
+| 数据源 | 账号 | 自动能力 |
+|---|---|---|
+| DNS、RDAP、RIPEstat、crt.sh | 不需要 | 注册信息、解析、网络归属、证书历史 |
+| PhishShield、IPGuard | 不需要 | 自动下载静态名单，建立本地 IOC 库，进行精确匹配 |
+| OTX | 免费账号 | 社区威胁情报关联 |
+| urlscan.io | 免费账号 | 已有历史扫描结果（不提交新扫描） |
+| VirusTotal | API Key | 获得符合条款的权限后查询既有域名检测结果 |
+| 微步在线 | 需有域名分析 API 额度 | 可选威胁情报检查 |
 
-| 源 | 数据类型 | 免费/许可依据 | 自动规则 |
-|---|---|---|---|
-| **PhishShield** | 已整理的钓鱼候选域名 | 项目声明 MIT；需核实机构部署政策 | 默认尝试下载；JS 静态名单解析，格式变化则失败保留旧缓存 |
-| **IPGuard** | 攻击来源 IP | 项目声明 CC BY 4.0；署名及保存注释 | 默认尝试下载；与申请域名当前解析 IP 比对，**弱关联** |
-| **anti-AD** | 广告、追踪和隐私过滤域名，**不是恶意 IOC** | 项目声明 MIT，但聚合上游许可需进一步核实 | **默认关闭**；完成许可审核后可选加入 |
+不是所有免费网页平台都提供可自动调用的免费 API。没有接口的来源不会通过爬虫规避登录或配额限制。VirusTotal Public API 的免费使用范围有限制，配置向导会提示官方条款，只有确认符合条件才启用。
 
-```bash
-python scripts/domain_audit.py ioc-update
-python scripts/domain_audit.py ioc-status
-python scripts/domain_audit.py ioc-check --domain ifuwuyun.com  # 纯离线，不解析 DNS
-python scripts/domain_audit.py ioc-check --domain ifuwuyun.com --ip 8.8.8.8 # 明确给出的公网 IP
-# 机构核实聚合上游规则许可证后可选择添加非恶意类别：
-python scripts/domain_audit.py ioc-update --include-adtracking --license-reviewed
-# 隔离环境：由机构批准的渠道取得源文件并从本地导入（见 LOCAL_IOC.md）
-python scripts/domain_audit.py ioc-import --feed cn_ipguard --file /safe/approved/blacklist.txt
-```
-
-规则缓存路径：`data/ioc_rules.sqlite3`，被 `.gitignore` 排除，不打包实际情报。数据源下载失败、格式错误或条数不足均保留旧缓存；超过 7 天视为过期，不当作实时安全证据。每次报告记录来源、 SHA256、许可、更新时间、命中类别、证据限制与待复核项。命中**永远不自动拦截/批准**。
-
-**已完成离线单元测试；未从当前环境实测拉取全部三个真实上游。** 受网络出口、GitHub 可用性和上游格式变化影响，以第一次 `ioc-update` 的实际输出判断每个 feed 是否成功，不能把测试模拟数据当作真实情报。详细说明见 [`references/LOCAL_IOC.md`](references/LOCAL_IOC.md)。
-
-## 免费服务/注册
-
-- 不需要注册：IANA RDAP、系统 DNS、RIPEstat、crt.sh。
-- 可选账号 Key：AlienVault OTX、urlscan.io（仅查询已有扫描；严格遵守使用限额）。
-- 国内免费网页交叉验证：微步 X、奇安信、腾讯（功能/次数/商用权限以当前账户条款为准）；微步域名 API 额外授权确认，不保证免费。
-- **VirusTotal Public API：新增“先判用途、再申请”的条件流程。** `init` 会先询问是否为银行/企业/商业业务：选“是”（默认）立即跳过 VT 注册和 Key 输入，`doctor --online` 和 `audit` 也**绝不请求 VT**，并把原因写入报告。只有明确选择个人/学术**非商业用途**，才提示免费注册并调用已有域名报告 API。
-- 不包含：DomainTools 付费 Iris 数据、AbuseIPDB 免费个人版；不提供 VirusTotal 商用免费授权。
-- 免费 ≠ 无限请求；**对机构/商业用途须先核实服务许可**。详细步骤见 `references/SERVICE_SETUP.md`。
-
-## VirusTotal 用途开关（银行环境务必使用 business）
+## 其他命令
 
 ```bash
-# 企业 / 银行 / 商业用途：默认模式，免费 VirusTotal API 直接跳过
-python scripts/domain_audit.py init --usage business
-
-# 无交互/Agent/CI：默认为 business，不会偷偷调用 VirusTotal
-python scripts/domain_audit.py init --non-interactive
-
-# 仅适用于明确合规的个人非商业/学术研究；首次注册见 references/SERVICE_SETUP.md
-python scripts/domain_audit.py init --usage noncommercial
-```
-
-VirusTotal 官方禁止 Public API 用于商业产品或服务，以及不贡献新文件的业务工作流。银行外联准入属于此类场景，所以**即使填了 VT_API_KEY，程序也不会执行调用**。仅非商业场景才可按官网规则使用免费 API（目前官方文档列出 4 次/分钟、500 次/天；以官方最新规则为准）。报告内 `sources.virustotal.status=skipped`、`data.skip_reason=commercial_use_restriction`，以便审计。不要把用户业务 FQDN/URL/Token 提交给外部情报平台；公共 API 的域名查询指标可能加入 VT 数据集。
-
-官方条款：https://docs.virustotal.com/reference/public-vs-premium-api
-
-## 典型使用
-
-```bash
-# 首次初始化：用 getpass 隐藏 Key 输入，避免出现在终端回显中
-python scripts/domain_audit.py init
-
-# 不访问网络即可检查配置
-python scripts/domain_audit.py doctor
-
-# 获得单位网络许可后验证 API 连通性/Key
+# 随时补充和修改密钥
+python scripts/domain_audit.py setup
+# 检查密钥是否配置，并在线验证
 python scripts/domain_audit.py doctor --online
-
-# 基础调查（不会访问目标域名对应的网站，不会执行端口扫描）
-python scripts/domain_audit.py audit --domain ifuwuyun.com
-
-# 业务资料补充后重新调查
-python scripts/domain_audit.py audit --domain ifuwuyun.com --business-file business_context.json
-
-# 严格需要审批同意后才能启用的 TLS 证书实时校验
-python scripts/domain_audit.py audit --domain ifuwuyun.com --business-file business_context.json --tls-probe
+# 自动化/CI 中取消首次交互提示
+python scripts/domain_audit.py audit --domain example.com --no-prompt
+# 添加旧版 Markdown 技术报告（默认不生成）
+python scripts/domain_audit.py audit --domain example.com --markdown
+# 显式更新本地安全规则
+python scripts/domain_audit.py ioc-update
+# 查看本地规则状态
+python scripts/domain_audit.py ioc-status
 ```
 
-## v1.3 新增：中国国内威胁情报交叉验证
+默认只做只读的被动查询，不主动访问目标网站、运行端口或漏洞扫描，也不会自动修改任何访问权限。检测结果基于成功获得的数据，未命中不等于安全，查询失败会标注为未完成。更多配置说明见 [服务指南](references/SERVICE_SETUP.md)。
 
-可选三个**网页人工复核**来源（无人值守时自动跳过）：微步在线 X 情报社区、奇安信威胁情报中心、腾讯安全威胁情报中心。默认不抓取网页、不调用未授权 API；网页功能/限额视账户而定。
+## 安全与隐私
 
-1. 登录各平台，核查**申请中的精确 FQDN**（不是注册域或共享 IP），保留截图或受控 ITSM 工单编号、日期、核查人；推荐至少两家。
-2. 复制 `assets/domestic_evidence.example.json` 为 `domestic_evidence.json`，**将所有合成演示记录替换为真实记录**；没查的平台删除对应条目，不能勾选“无已知威胁”。记录 `verdict` 只能为 `malicious / suspicious / no_known_threat / inconclusive`。
-3. 执行：
+- 仅输入公开域名（FQDN），不要传带账号或参数的 URL。
+- `.env`、本地规则数据库及 `reports/` 已列入 `.gitignore`。
+- HTML 不含外链脚本、外部图片或追踪服务；所有域名与证据文本都执行 HTML 转义。
+- 你可以使用任何符合所在环境安全规定的网络连接；无法连接某个数据源时会在报告标明。
 
-```bash
-python scripts/domain_audit.py audit --domain ifuwuyun.com \
-  --business-file business_context.json \
-  --domestic-evidence domestic_evidence.json
-```
-
-输出报告新增国内交叉验证矩阵与证据编号，原始结果明确标注“人工填报、未由程序验证网页真伪”；不存在“多家都零命中就安全”的推导。微步域名分析 API **只有账户具有该接口的免费额度且允许本单位使用时**，本地设置 `THREATBOOK_API_AUTHORIZED=yes` 及 `THREATBOOK_API_KEY` 才会调用。`init` 不会诱导申请收费套餐；默认 `no`，永不调用该接口。详见 `references/DOMESTIC_INTEL.md`。
-
-**报告遵守银行保密要求**：建议在批准的情报查询节点实施，检查是否允许将目标 FQDN 提交第三方；业务源/客户/传输参数留在内部。
-
-## 既有 v1.2 更新（借鉴开源 Skill 的可审计设计）
-
-1. **被动依赖资产清单**：从当前 DNS CNAME 和 urlscan 的历史终点抽取关联主机，仅做证据记录；只有请求中指定的 FQDN 在准入申请范围，其余条目不得自动查询、自动扩域或放通。`asset_inventory[*].in_approved_scope=false`。
-2. **证据可追溯性**：`evidence_ledger` 为每个数据源赋予 `EV-01` 等证据编号，记录 `checked_at`、有则记录 `observed_at`、来源和解释限制；风险发现可引用 `evidence_ids` 并说明 `confidence`，避免“一段结论却没有证据”。
-3. **时效与覆盖率**：`evidence_coverage` 显示 `ok / empty / error / not_configured / skipped` 分布，并提醒超过 90 天的第三方历史记录；这不是安全评分。
-4. **历史快照对比**：默认自动使用同域名最近报告，亦可用 `--baseline` 对比历史 DNS IP 集合、CNAME、注册商；发现差异时阻止“直接进入审批”，需人工复核。查询失败不会自动生成变更告警。
-5. **报告可直接关联 ITSM**：Markdown 适合审批阅读、JSON 适合下一步系统集成；本工具依旧不做自动授权、不访问目标网站、不提供恶意 0–100 分数。
-
-参考设计来源与许可边界参见 `references/OPEN_SOURCE_INSPIRATION.md`。
-
-## 范围与边界
-
-- **绝无必须购买的 API**。但免费层并非无限量，也不保证机构商业使用获得授权；本单位审批前必须核实当期服务条款。
-
-- 只允许输入 FQDN，不接受 URL/端口；避免暴露内部业务接口路径、Token 和客户参数。
-- `business_context.json` 在本地读取并写入本地报告，不向第三方传输；报告本身可能含敏感业务信息，按内部制度保管。
-- 当前 DNS 查询取决于**运行该程序的本地解析器视角**，不能当作公网多地解析结果。
-- 注册域默认按常见域名后缀离线估算（例如 `.com`、`.com.cn`、`.co.uk`）；遇到特殊多级公共后缀时，务必核实并使用 `--registered-domain your.registered.domain` 指定，以防误查 RDAP/NS。
-- RIPEstat 返回 IP 前缀和 ASN，并不是恶意信誉；证书透明度记录也不能证明当前 TLS 服务安全。
-- 共享 CDN/云 IP 的恶意域名关联不能直接定性本域名恶意。
-- 任何外部 API 断开或被限流，均记作异常/不完整，不会生成虚假的“安全”结论；VT 商业限制导致的 `skipped` 也不代表无风险。
-- 如果**可选的** `business_context.json` 指定 `usage_type: "business"`，则即使本地误配置为 `VT_USAGE=noncommercial` 仍强制跳过 VT。
-- 工具不做自动开通网络策略，不做渗透/漏洞扫描，不覆盖供应商身份认证、数据分级分类、银行内部审批。
-
-## Skill 安装
-
-把整个 `domain-egress-audit-skill` 文件夹放到 Agent 的 skills 目录，并按照所使用 Agent 的 Skills 发现方式启用（常见约定是读取目录中的 `SKILL.md`）。如果平台不支持 Skills，也可以直接使用 CLI。
-
-## 开发自测
+## 开发测试
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-仅包含本项目开发所需 Python 依赖；所有第三方数据端点均有各自的服务条款和可用性限制，无稳定性 SLA 承诺。
+此工具是辅助查询，非安全承诺。所有外部威胁数据具有时间滞后或误报可能；请结合访问内容谨慎判断。
