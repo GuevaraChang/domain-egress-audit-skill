@@ -468,6 +468,15 @@ def vt_check(host, api_key, usage):
             data={'api_called': True, 'last_analysis_stats': values,
                   'last_analysis_date': analysis_date, 'reputation': attrs.get('reputation')},
             url='https://www.virustotal.com/gui/domain/' + quote(host, safe=''))
+    except requests.HTTPError as exc:
+        # 404 表示 VT 库中暂无该对象记录，属于"无情报"而非接口故障；仍不得当作安全。
+        if getattr(exc, 'response', None) is not None and exc.response.status_code == 404:
+            return source('error', summary='VirusTotal 库中暂无该域名记录（HTTP 404，非查询故障）；无记录不等于安全',
+                          error='no_virustotal_record', data={'api_called': True, 'no_record': True},
+                          url='https://www.virustotal.com/gui/domain/' + quote(host, safe=''))
+        return source('error', summary='VirusTotal 查询失败，不能当成无风险', error=exc,
+                      data={'api_called': True},
+                      url='https://www.virustotal.com/gui/domain/' + quote(host, safe=''))
     except (requests.RequestException, ValueError, KeyError, TypeError, OverflowError) as exc:
         return source('error', summary='VirusTotal 查询失败，不能当成无风险', error=exc,
                       data={'api_called': True},
@@ -685,7 +694,8 @@ def evaluate(report):
             findings.append({'severity': 'medium', 'type': 'virustotal_detection', 'confidence': 'medium', 'evidence_ids': ids('virustotal'),
                              'detail': f'VirusTotal 既有分析中 malicious={malicious}, suspicious={suspicious}；需核实具体引擎和时效，不能直接判定恶意'})
     elif vt['status'] in ('not_configured', 'error') and ctx.get('manual_threat_review_completed') is not True:
-        pending.append('VirusTotal 数据不可用')
+        pending.append('VirusTotal 库中暂无该域名记录，缺少第三方信誉交叉验证'
+                       if (vt.get('data') or {}).get('no_record') else 'VirusTotal 数据不可用')
     # vt.status=skipped 且因为某些用途限制时，是合规跳过而不是技术无风险。
     us = src['urlscan']
     live = src.get('urlscan_live') or {}
