@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 SOURCE_NAMES = {
     'rdap': '域名注册信息', 'dns': 'DNS 解析', 'ripestat': 'IP / 服务器归属',
-    'crtsh': '网站证书历史', 'urlscan': '网站历史扫描', 'urlscan_live': '可选实时网页扫描',
+    'crtsh': '网站证书历史', 'urlscan': '网站历史扫描', 'urlscan_live': '实时网页扫描',
     'virustotal': 'VirusTotal 安全检测', 'tls': 'HTTPS 连接测试',
     'local_ioc': '免费开源安全名单',
 }
@@ -50,6 +50,10 @@ def source_view(key, item, problems):
     if matched:
         return ('warn', '发现线索', f'{title}发现需要核实的信息')
     if state == 'ok':
+        if key == 'urlscan' and (item.get('data') or {}).get('history_scope') == 'related_subdomains_only':
+            return ('mute', '仅关联子域名', '没有目标主机的直接历史，以下仅为相关子域名线索')
+        if key == 'urlscan_live':
+            return ('ok', '实时检查完成', 'urlscan 已返回本次网站扫描详情')
         if key == 'local_ioc':
             records = item.get('data') or {}
             feeds = records.get('feeds') or []
@@ -59,7 +63,7 @@ def source_view(key, item, problems):
                 return ('warn', '部分过期', '部分本地情报未能及时更新，需谨慎解释结果')
         return ('ok', '已完成', f'{title}已查询；在本次规则范围内没有触发明显异常')
     if state == 'partial':
-        return ('mute', '部分完成', '已取得部分历史扫描详情，剩余数据可能因权限、配额或历史记录失效而缺失')
+        return ('mute', '部分完成', '扫描结果未全部返回，或部分历史详情无法读取')
     if state == 'empty':
         return ('mute', '未找到数据', f'{title}未找到可用的历史记录')
     if state == 'skipped':
@@ -87,6 +91,7 @@ def render(report):
     mapping = {'rdap': {'new_domain', 'young_domain'}, 'dns': {'non_public_ip'},
                'virustotal': {'virustotal_detection'},
                'urlscan': {'off_domain_redirect', 'urlscan_historical_malicious'},
+               'urlscan_live': {'urlscan_live_malicious'},
                'local_ioc': {'local_phishing_ioc', 'local_ip_association', 'local_adtracking'},
                'tls': {'tls_probe_failed'}}
     positive = {k for k, v in mapping.items() if any(f.get('type') in v for f in display_findings)}
@@ -132,10 +137,13 @@ def render(report):
             flagged = '<span class="state warn">历史扫描被标记</span>' if x.get('urlscan_malicious') else ''
             result_link = clean_href(x.get('result_url'))
             link = f'<a href="{esc(result_link)}" target="_blank" rel="noopener noreferrer">查看扫描证据 ↗</a>' if result_link else ''
-            return (f'<div class="history-item"><b>{title}</b>　{offsite} {flagged}'
+            related_note = '<span class="state mute">关联子域名（不代表当前主机）</span>' if x.get('relation_to_target') == 'related_subdomain' else ''
+            return (f'<div class="history-item"><b>{title}</b>　{related_note} {offsite} {flagged}'
                     f'<p class="fine">扫描：{date} · 页面域名：{host} · IP：{address}</p>'
                     f'<p class="small">请求 {requests_count} 次 · 外部资源域名 {external_count} 个　{link}</p></div>')
-        history_html = ('<p class="small">以下为已有的第三方历史扫描，不能代替网站当前状态。'
+        related_only = history.get('history_scope') == 'related_subdomains_only'
+        scope_note = '未找到目标主机的直接扫描；以下仅是关联子域名历史，不可据此认定目标主机有风险。' if related_only else ''
+        history_html = ('<p class="small">' + esc(scope_note) + ' 以下为已有的第三方历史扫描，不能代替网站当前状态。'
                         '没有记录或没有历史风险命中，不等于安全。</p>'
                         f'<div class="history-stats"><b>详细记录 {esc(history.get("detailed_results", len(history_entries)))}</b>'
                         f' · 历史 IP {esc(len(history.get("history_ips") or []))} 个'
@@ -144,18 +152,34 @@ def render(report):
         if len(history_entries) > 8:
             history_html += f'<p class="small">另有 {len(history_entries)-8} 条记录详见下方技术详情和 JSON 文件。</p>'
     elif (sources.get('urlscan') or {}).get('status') == 'empty':
-        history_html = '<p class="quiet">查询范围内没有找到历史扫描，不代表网站安全。</p>'
+        days = history.get('search_date_limit_days')
+        age_note = f'当前账户仅能检索最近 {esc(days)} 天。' if days is not None else ''
+        history_html = '<p class="quiet">' + age_note + '没有找到该主机及相关子域名的可见历史扫描；不代表网站安全。</p>'
     elif (sources.get('urlscan') or {}).get('status') in ('not_configured','skipped'):
         history_html = '<p class="quiet">未配置 urlscan API Key，网站历史扫描尚未执行。</p>'
     else:
         history_html = '<p class="quiet">历史扫描数据暂时不可用，未能作出判断。</p>'
     live = sources.get('urlscan_live') or {}
-    if live.get('status') in ('ok', 'partial'):
-        link = clean_href(live.get('source_url'))
-        history_html += '<p class="small">本次已按用户明确请求提交实时扫描。'
-        if link:
-            history_html += f' <a href="{esc(link)}" target="_blank" rel="noopener noreferrer">查看本次结果 ↗</a>'
-        history_html += '</p>'
+    live_info = live.get('data') or {}
+    live_status = live.get('status')
+    live_url = clean_href(live.get('source_url'))
+    live_link = f'<a href="{esc(live_url)}" rel="noopener noreferrer" target="_blank">查看本次实时扫描 ↗</a>' if live_url and live_status in ('ok','partial') else ''
+    if live_status == 'ok':
+        result = live_info.get('result') or {}
+        title = esc(result.get('page_title') or '无标题')
+        flagged = '<b class="state warn">urlscan 标记了可疑行为</b>' if result.get('urlscan_malicious') else '未发现 urlscan 的恶意标记（不代表安全）'
+        safe_domain = esc(report.get('domain','未知域名'))
+        live_html = (f'<p class="small">本次已通过 urlscan 远程浏览器检查 https://{safe_domain}/ 。</p>'
+                     f'<div class="history-stats"><b>扫描完成</b> · 标题：{title} · {flagged}</div>'
+                     f'<p class="small">{live_link}</p>')
+    elif live_status == 'partial':
+        live_html = f'<p class="small">实时扫描已提交，结果仍在生成中，稍后查看链接。{live_link}</p>'
+    elif live_status == 'not_configured':
+        live_html = '<p class="quiet">缺少 urlscan API Key：无法进行实时扫描。运行 setup 配置即可自动开启。</p>'
+    elif live_status == 'skipped':
+        live_html = '<p class="quiet">实时扫描已关闭，或目标没有确认的公网 IP。</p>'
+    else:
+        live_html = '<p class="quiet">实时扫描失败或被平台拒绝；请检查 API 配额、网络与可见性权限。</p>'
     domain = esc(report.get('domain', '未知域名'))
     checked = esc(report.get('checked_at') or '未知时间')
     rid = esc(report.get('report_id', '—'))
@@ -189,9 +213,10 @@ a{color:#1d5aa6}footer{font-size:12px;color:#586679;line-height:1.7;margin-top:2
 <p class="small">%s</p><p class="recommend">建议：%s</p></section>
 <section class="panel"><h2>发现的问题</h2>%s</section>
 <section class="panel"><h2>网站历史扫描</h2>%s</section>
+<section class="panel"><h2>本次实时网页扫描</h2>%s</section>
 <section class="grid"><div class="panel"><h2>已经检查</h2>%s</div>
 <div class="panel"><h2>未完成或未配置</h2>%s</div></section>
 <section class="panel"><h2>技术详情（需要时再看）</h2><p class="small">点击展开即可查看原始证据，不需要阅读全部内容。</p>%s</section>
 <footer>报告编号：%s。由公开数据源自动生成，只代表当前成功完成的检查；未查到不等于绝对安全。报告不主动批准、拦截或修改任何网络访问。</footer>
-</main></body></html>''' % (domain, domain, checked, esc(summary['level']), esc(summary['title']), esc(summary['reason']), esc(summary['recommendation']), problem_html, history_html, success_html, unknown_html, ''.join(details), rid)
+</main></body></html>''' % (domain, domain, checked, esc(summary['level']), esc(summary['title']), esc(summary['reason']), esc(summary['recommendation']), problem_html, history_html, live_html, success_html, unknown_html, ''.join(details), rid)
     return html_text

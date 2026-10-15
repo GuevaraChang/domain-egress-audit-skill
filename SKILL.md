@@ -3,7 +3,7 @@ name: domain-egress-audit
 description: 通过公开数据源检查域名是否存在安全风险。首次主动引导配置可选免费 API，可由具备本地文件权限的 Agent 在会话接收 API Key 安全写入 .env；自动生成容易理解的 HTML 安全报告。
 ---
 
-# Domain Safety Check Skill · v2.1
+# Domain Safety Check Skill · v2.2
 
 ## 适用范围与原则
 
@@ -11,7 +11,7 @@ description: 通过公开数据源检查域名是否存在安全风险。首次�
 
 默认使用：无需密钥的 **DNS / RDAP / RIPEstat / crt.sh**、**PhishShield / IPGuard 开源静态安全名单**，以及可选的 **urlscan.io / VirusTotal**。**anti-AD** 默认作为广告追踪辅助线索（不得当作恶意 IOC 定性），使用者应核对聚合上游的许可，不参与恶意 IOC 定性。无须注册开源名单的 API；不使用其他第三方情报厂商 API，不要求人工提交情报文件。
 
-- 默认读取第三方已有历史扫描详细结果，同时自动进行 TLS 握手检查（不发送 HTTP 请求）。远程实时网页扫描始终关闭，只有明确选择 `--live-scan` 才会由 urlscan 平台提交新扫描。
+- 默认读取第三方已有历史扫描详细结果，同时自动进行 TLS 握手检查（不发送 HTTP 请求）。已配置 urlscan Key 且解析为公网 IP 时，默认提交 Private 远程实时网页扫描；用户可用 `--no-live-scan` 关闭。
 - 仅提交目标公开 FQDN；不要查询内部域名、包含密码或 Token 的 URL。
 - API 缺失、接口超额、网络错误必须单独标明“未检查”，不能视为安全。
 - VirusTotal 免费 Public API 有官方许可限制。仅用户确认具备适用授权时开启；否则不调用。
@@ -55,7 +55,7 @@ python scripts/domain_audit.py audit --domain example.com
 
 ## 历史网站扫描和实时网站扫描的边界
 
-- 默认：读取 urlscan 已有的历史 Search 结果，再逐条获取 Result JSON；提取历史截图链接、页面标题、最终域名、历史 IP、请求量、第三方资源域名、历史威胁标记。默认 15 条，`--history-limit 1..50` 可调整，受额度限制；不要宣称已覆盖全网全部历史。
+- 默认：读取 urlscan 已有的历史 Search 结果，再逐条获取 Result JSON；提取历史截图链接、页面标题、最终域名、历史 IP、请求量、第三方资源域名、历史威胁标记。默认 15 条，`--history-limit 1..50` 可调整；精确 FQDN 无记录时补查子域名并标注弱关联；免费账户可能有 90 天历史范围限制，受额度限制；不要宣称已覆盖全网全部历史。
 - 无 API Key、无历史记录、单条详情失败或 429 限额，必须明确标示“未检查 / 未找到 / 部分完成”，不得报告为安全。
 - 实时网页扫描默认**禁止提交**。仅显式 `--live-scan` 开启；默认 `private`，如权限不足不降级公开。用户自行确认域名公开可扫描、没有敏感路径或数据后才可使用。
 - `--no-tls-probe` 仅关闭默认 TLS 握手；它与 urlscan 远程实时网页扫描是两种不同功能。

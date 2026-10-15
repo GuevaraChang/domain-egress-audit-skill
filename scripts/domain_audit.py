@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Free-source, read-only external FQDN due-diligence and reporting CLI.
 
-No paid threat intelligence, no URL submission, no active target connection by default.
+No paid threat intelligence. urlscan Private remote root-URL scanning is enabled by default when configured; it can be disabled.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ import local_ioc
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV = ROOT / '.env'
-UA = 'DomainSafetySkill/2.1 (historical scan details + opt-in live scan)'
+UA = 'DomainSafetySkill/2.2 (historical scan + default private live scan)'
 TIMEOUT = 9
 RDAP_BOOTSTRAP = 'https://data.iana.org/rdap/dns.json'
 URLSCAN_SEARCH = 'https://urlscan.io/api/v1/search/'
@@ -334,41 +334,83 @@ def urlscan_fetch_detail(scan_id, api_key, host, *, search_item=None):
 
 
 def urlscan_check(host, api_key, *, max_scans=URLSCAN_HISTORY_DEFAULT):
-    """Search existing scans and fetch detailed JSON for each selected scan; never submit."""
+    """Read matching existing scans. If no exact host exists, inspect separately marked related subdomains.
+
+    Free accounts may only search recent history. A related hostname is never
+    equivalent to evidence about the exact FQDN being checked.
+    """
     if not api_key:
-        return source('not_configured', summary='未配置 urlscan API Key，历史完整扫描未执行；不提交新扫描',
+        return source('not_configured', summary='未配置 urlscan API Key，历史扫描未执行',
                       url='https://urlscan.io/docs/api/')
     limit = min(max(1, int(max_scans)), URLSCAN_HISTORY_LIMIT)
+    exact_q = f'(task.domain.keyword:"{host}" OR page.domain.keyword:"{host}")'
+    # The "domain" field is hierarchical. Never treat a related subdomain as exact.
+    related_q = f'(task.domain:{host} OR page.domain:{host})'
+    info = {'matched_results':0, 'detailed_results':0, 'results':[],
+            'history_limit':limit, 'search_date_limit_days':None,
+            'history_scope':'none', 'exact_fqdn_results':0,
+            'related_subdomain_results':0, 'search_queries':[exact_q]}
     try:
-        raw = req_json(URLSCAN_SEARCH, headers={'api-key': api_key},
-                       params={'q': f'(task.domain.keyword:"{host}" OR page.domain.keyword:"{host}")', 'size': limit})
-        rows = []
-        for entry in raw.get('results') or []:
-            page, task = entry.get('page') or {}, entry.get('task') or {}
-            if (page.get('domain') or '').lower() != host and (task.get('domain') or '').lower() != host:
-                continue
-            rows.append(entry)
-        selected = rows[:limit]
+        raw = req_json(URLSCAN_SEARCH, headers={'api-key':api_key},
+                       params={'q':exact_q, 'size':limit})
+        info['search_date_limit_days'] = raw.get('search_date_limit_days')
+        def hosts(entry):
+            page = entry.get('page') or {}
+            task = entry.get('task') or {}
+            return ((page.get('domain') or '').lower().rstrip('.'),
+                    (task.get('domain') or '').lower().rstrip('.'))
+        selected = [e for e in (raw.get('results') or []) if host in hosts(e)][:limit]
+        related_error = None
+        related_only = False
         if not selected:
-            return source('empty', summary='该账户可搜索的历史范围内未发现扫描记录；不证明网站安全',
-                          data={'matched_results':0, 'detailed_results':0, 'results':[],
-                                'history_limit':limit,'search_date_limit_days':raw.get('search_date_limit_days'),
-                                'scope':'仅 urlscan 可见的历史范围'},
+            try:
+                info['search_queries'].append(related_q)
+                # A bounded second search is only performed when exact history is absent.
+                related_raw = req_json(URLSCAN_SEARCH, headers={'api-key':api_key},
+                    params={'q':related_q,'size':min(limit * 4, 100)})
+                if info['search_date_limit_days'] is None:
+                    info['search_date_limit_days'] = related_raw.get('search_date_limit_days')
+                def is_child(domain):
+                    return domain.endswith('.' + host)
+                rows = [e for e in (related_raw.get('results') or [])
+                        if any(is_child(h) for h in hosts(e))]
+                # Defensive filter: exact matches appearing in fallback remain exact.
+                exact_in_fallback = [e for e in rows if host in hosts(e)]
+                if exact_in_fallback:
+                    selected = exact_in_fallback[:limit]
+                else:
+                    selected = rows[:limit]
+                    related_only = bool(selected)
+            except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+                related_error = type(exc).__name__
+        if not selected:
+            note = '该账户可搜索的历史时间范围内没有目标域名或关联子域名记录；不证明网站安全'
+            if info['search_date_limit_days'] is not None:
+                note = f'仅可查询近 {info["search_date_limit_days"]} 天：未找到历史记录，不证明网站安全'
+            if related_error:
+                info['detail_errors'] = ['关联子域名查询失败：' + related_error]
+                return source('partial', summary=note+'；关联子域名搜索未完成',data=info,
+                              url='https://urlscan.io/search/#domain:' + quote(host))
+            return source('empty',summary=note,data=info,
                           url='https://urlscan.io/search/#domain:' + quote(host))
+        info['history_scope'] = 'related_subdomains_only' if related_only else 'exact_fqdn'
+        info['matched_results'] = len(selected)
+        info['related_subdomain_results' if related_only else 'exact_fqdn_results'] = len(selected)
         results, problems = [], []
         for item in selected:
             scan_id = str(item.get('_id') or (item.get('task') or {}).get('uuid') or '')
             if not UUID_PATTERN.fullmatch(scan_id):
                 problems.append('历史记录未返回有效扫描 ID')
-                # Missing detail stays partial. Search preview is NOT a complete scan.
                 continue
             try:
-                results.append(urlscan_fetch_detail(scan_id, api_key, host, search_item=item))
+                record = urlscan_fetch_detail(scan_id,api_key,host,search_item=item)
+                record['relation_to_target'] = 'related_subdomain' if related_only else 'exact_fqdn'
+                results.append(record)
             except requests.HTTPError as exc:
                 code = exc.response.status_code if exc.response is not None else None
                 problems.append(f'扫描 {scan_id[:8]} 详情不可用（HTTP {code or "?"}）')
                 if code == 429:
-                    break  # Respect quota; do not retry repeatedly.
+                    break
             except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
                 problems.append(f'扫描 {scan_id[:8]} 详情失败（{type(exc).__name__}）')
         status = 'ok' if len(results) == len(selected) else 'partial'
@@ -376,25 +418,21 @@ def urlscan_check(host, api_key, *, max_scans=URLSCAN_HISTORY_DEFAULT):
         titles = sorted({v.get('page_title') for v in results if v.get('page_title')})
         redirect_count = sum(v.get('redirected') == 'off-domain' for v in results)
         malicious_count = sum(v.get('urlscan_malicious') is True for v in results)
-        return source(status, summary=f'已读取 {len(results)}/{len(selected)} 条历史扫描完整结果摘要，跨域跳转 {redirect_count} 条；仅反映历史行为',
-                      data={'matched_results': len(selected), 'detailed_results':len(results),
-                            'results':results, 'history_limit':limit,
-                            'search_has_more':bool(raw.get('has_more')),
-                            'search_date_limit_days':raw.get('search_date_limit_days'),
-                            'history_ips':ips, 'historical_titles':titles[:20],
-                            'cross_domain_redirects': redirect_count,
-                            'urlscan_malicious_scans':malicious_count,
-                            'detail_errors':problems[:15],
-                            'coverage_note':'读取可见历史记录的详情，非全网或无限量历史扫描；截图提供链接但未自动下载'},
-                      url='https://urlscan.io/search/#domain:' + quote(host))
+        info.update({'detailed_results':len(results), 'results':results, 'history_ips':ips,
+                     'historical_titles':titles[:20],'cross_domain_redirects':redirect_count,
+                     'urlscan_malicious_scans':malicious_count,'detail_errors':problems[:15],
+                     'coverage_note':'仅检查账号可见的历史；关联子域名记录不构成当前目标主机的恶意证据'})
+        kind = '关联子域名' if related_only else '目标主机'
+        return source(status, summary=f'已读取{kind} {len(results)}/{len(selected)} 条历史详情，跨域跳转 {redirect_count} 条；历史记录不等于当前状态',
+                      data=info,url='https://urlscan.io/search/#domain:' + quote(host))
     except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-        return source('error', summary='urlscan 历史扫描查询失败，不当作安全', error=exc, url=URLSCAN_SEARCH)
+        return source('error',summary='urlscan 历史扫描查询失败，不能视为安全',error=exc,url=URLSCAN_SEARCH)
 
 
-def urlscan_live_check(host, api_key, *, enabled=False, visibility='private', public_ips=None, attempts=5, delay=4):
-    """Explicit opt-in submission; private by default, no automatic switch to public."""
+def urlscan_live_check(host, api_key, *, enabled=True, visibility='private', public_ips=None, attempts=5, delay=4):
+    """Submit a private scan by default when configured; never downgrade to public."""
     if not enabled:
-        return source('skipped', summary='默认不提交实时网站扫描（需明确使用 --live-scan）')
+        return source('skipped', summary='已通过 --no-live-scan 关闭实时网站扫描')
     if not api_key:
         return source('not_configured', summary='实时网站扫描需先配置 urlscan.io API Key')
     if visibility not in ('private','unlisted','public'):
@@ -420,7 +458,7 @@ def urlscan_live_check(host, api_key, *, enabled=False, visibility='private', pu
                 time.sleep(max(0, min(float(delay), 8)))
             try:
                 detail = urlscan_fetch_detail(scan_id, api_key, host)
-                return source('ok', summary='经明确请求已完成实时远程网页扫描，结果可查看；这不是本机直接扫描',
+                return source('ok', summary='远程实时网页扫描已完成（默认 Private），这不是本机直接扫描',
                               data={'submission_status':'complete', 'visibility':visibility,
                                     'scan_url':scan_url, 'result':detail}, url=link)
             except requests.HTTPError as exc:
@@ -428,7 +466,7 @@ def urlscan_live_check(host, api_key, *, enabled=False, visibility='private', pu
                     break
             except (requests.RequestException, ValueError):
                 break
-        return source('partial', summary='已提交实时扫描，尚未取得完整结果；请稍后查看 urlscan 链接',
+        return source('partial', summary='已提交实时扫描，平台仍在处理；稍后可通过结果链接查看',
                       data={'submission_status':'pending', 'visibility':visibility,
                             'scan_url':scan_url, 'scan_id':scan_id}, url=link)
     except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
@@ -695,13 +733,16 @@ def evaluate(report):
                          'detail':'本次可选实时网页扫描被 urlscan 标为恶意，需核实具体页面和相关证据'})
     if us['status'] == 'partial':
         pending.append('urlscan 部分历史扫描详情未能获取，结果不完整')
+    if live.get('status') in ('error','partial'):
+        pending.append('urlscan 实时扫描未完成，具体原因见报告详情')
     if us['status'] in ('ok','partial'):
-        flagged = [x for x in us['data'].get('results', []) if x.get('urlscan_malicious') is True]
+        exact_records = [x for x in us['data'].get('results', []) if x.get('relation_to_target', 'exact_fqdn') == 'exact_fqdn']
+        flagged = [x for x in exact_records if x.get('urlscan_malicious') is True]
         if flagged:
             findings.append({'severity':'medium','type':'urlscan_historical_malicious', 'confidence':'medium',
                              'evidence_ids':ids('urlscan'),
                              'detail': f'urlscan 历史记录中 {len(flagged)} 条被标记为恶意，请核实历史页面和误报；不能证明当前恶意'})
-        redirects = [x for x in us['data'].get('results', [])
+        redirects = [x for x in exact_records
                      if x.get('redirected') == 'off-domain'
                      or (x.get('result_page_host') and x.get('task_url_host')
                          and x['result_page_host'].lower() != x['task_url_host'].lower())]
@@ -864,7 +905,7 @@ def render_markdown(report):
     return '\n'.join(lines) + '\n'
 
 
-def build_report(host, registered, ctx, tls_probe=False, env=None, ioc_db=None, history_limit=URLSCAN_HISTORY_DEFAULT, live_scan=False, live_visibility="private"):
+def build_report(host, registered, ctx, tls_probe=False, env=None, ioc_db=None, history_limit=URLSCAN_HISTORY_DEFAULT, live_scan=True, live_visibility="private"):
     env = env if env is not None else read_env()
     d = dns_check(host, registered)
     r = rdap_check(registered)
@@ -882,7 +923,7 @@ def build_report(host, registered, ctx, tls_probe=False, env=None, ioc_db=None, 
                                           visibility=live_visibility, public_ips=[v['ip'] for v in ips if v['globally_routable']]),
     }
     instant = datetime.now(timezone.utc)
-    report = {'schema_version': '2.1.0',
+    report = {'schema_version': '2.2.0',
               'report_id': 'EDA-' + instant.strftime('%Y%m%dT%H%M%SZ') + '-' + re.sub(r'[^a-z0-9]+', '-', host)[:48],
               'checked_at': instant.isoformat(timespec='seconds'), 'domain': host,
               'registered_domain': registered, 'vt_usage': vt_usage,
@@ -928,7 +969,7 @@ def init_cmd(args):
     interactive = sys.stdin.isatty() and not args.non_interactive
     providers = [
       ('URLSCAN_API_KEY', 'urlscan.io', 'https://urlscan.io/user/signup/',
-       '注册并进入 Settings & API → New API Key；用于查询已有的公开扫描记录。'),
+       '注册并进入 Settings & API → New API Key；用于历史查询，并默认提交目标域名根路径的 Private 实时扫描（可 --no-live-scan 关闭）。'),
     ]
     for key, title, url, how in providers:
         if env.get(key) and not args.force:
@@ -1037,8 +1078,9 @@ def audit_cmd(args):
     if tls_probe:
         print('TLS：默认检查目标公网 IP:443（SNI 证书验证，不发送 HTTP 请求；可使用 --no-tls-probe 关闭）。')
     usage = effective_vt_usage(read_env(), ctx)
-    if getattr(args, 'live_scan', False):
-        print(f'按用户选择将向 urlscan.io 提交 https://{host}/ 的实时扫描，可见性：{args.live_visibility}。')
+    live_enabled = not getattr(args, 'no_live_scan', False)
+    if live_enabled:
+        print(f'配置了 urlscan Key 且目标解析到公网 IP 时，默认提交 https://{host}/ 的远程实时扫描，可见性：{getattr(args,"live_visibility","private")}；可通过 --no-live-scan 关闭。')
     print(f'正在检查 {host}，检查完成后会生成易读的 HTML 报告。')
     db = getattr(args, 'ioc_db', str(local_ioc.DEFAULT_DB))
     if getattr(args, 'no_auto_ioc_update', False):
@@ -1052,7 +1094,7 @@ def audit_cmd(args):
         print('本地 IOC 名单更新不完整：保留历史缓存，并在报告中说明；继续其他检查。')
     report = build_report(host, registered, ctx, tls_probe, ioc_db=db,
                           history_limit=getattr(args, 'history_limit', URLSCAN_HISTORY_DEFAULT),
-                          live_scan=getattr(args,'live_scan',False),
+                          live_scan=live_enabled,
                           live_visibility=getattr(args,'live_visibility','private'))
     out = Path(args.output).expanduser()
     out.mkdir(parents=True, exist_ok=True)
@@ -1158,7 +1200,8 @@ def main(argv=None):
     s_audit.add_argument('--tls-probe', action='store_true', help='兼容旧版参数；TLS 默认开启')
     s_audit.add_argument('--no-tls-probe', action='store_true', help='关闭默认 TLS 实时连接（仅被动查询）')
     s_audit.add_argument('--history-limit', type=int, choices=range(1, 51), metavar='1-50', default=15, help='默认分析最多 15 条历史扫描的详细结果；最多 50 条，受账号配额限制')
-    s_audit.add_argument('--live-scan', action='store_true', help='明确同意通过 urlscan.io 远程扫描目标网站，默认不提交')
+    s_audit.add_argument('--live-scan', action='store_true', help='兼容旧版本；实时网站扫描现已默认开启')
+    s_audit.add_argument('--no-live-scan', action='store_true', help='不向 urlscan 远程提交实时网站扫描；仅查询历史记录')
     s_audit.add_argument('--live-visibility', choices=['private','unlisted','public'], default='private', help='远程扫描结果可见性，默认 private，不自动降低隐私等级')
     s_audit.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB), help='本地安全名单 SQLite 路径')
     s_audit.add_argument('--no-auto-ioc-update', action='store_true', help='禁用自动更新，仍使用现有本地缓存')

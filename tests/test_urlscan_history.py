@@ -65,9 +65,19 @@ class HistoryTests(unittest.TestCase):
                 audit.urlscan_fetch_detail('../private?key=abc','key','example.com')
         req.assert_not_called()
 
-    def test_default_live_never_submits(self):
+    def test_default_live_submits_private(self):
+        response=unittest.mock.Mock(status_code=200)
+        response.json.return_value={'uuid':UUID}
+        with patch.object(audit.requests,'post',return_value=response) as post, \
+             patch.object(audit,'urlscan_fetch_detail',return_value={'page_title':'Demo'}):
+            result=audit.urlscan_live_check('example.com','key',public_ips=['1.1.1.1'],delay=0,attempts=1)
+        self.assertEqual(result['status'],'ok')
+        self.assertEqual(post.call_args.kwargs['json']['visibility'],'private')
+        self.assertEqual(post.call_count,1)
+
+    def test_explicit_no_live_scan_never_submits(self):
         with patch.object(audit.requests,'post') as post:
-            result=audit.urlscan_live_check('example.com','key',public_ips=['1.1.1.1'])
+            result=audit.urlscan_live_check('example.com','key',enabled=False,public_ips=['1.1.1.1'])
         post.assert_not_called()
         self.assertEqual(result['status'],'skipped')
 
@@ -103,5 +113,52 @@ class HistoryTests(unittest.TestCase):
         self.assertIn('跨域跳转',html)
         self.assertIn('&lt;svg',html)
         self.assertNotIn('<svg onload',html)
+
+
+    def test_related_subdomain_fallback_when_exact_empty(self):
+        related={'results':[{'_id':UUID,'task':{'domain':'www.example.com','time':'2026-10-10T00:00:00Z'},
+                             'page':{'domain':'www.example.com'}}], 'search_date_limit_days':90}
+        doc=detail()
+        doc['task']['domain']='www.example.com'
+        doc['task']['url']='https://www.example.com/'
+        doc['page']['url']='https://www.example.com/'
+        with patch.object(audit,'req_json',side_effect=[{'results':[],'search_date_limit_days':90},related,doc]) as req:
+            result=audit.urlscan_check('example.com','key')
+        self.assertEqual(req.call_count,3)
+        self.assertEqual(result['status'],'ok')
+        self.assertEqual(result['data']['history_scope'],'related_subdomains_only')
+        self.assertEqual(result['data']['exact_fqdn_results'],0)
+        self.assertEqual(result['data']['results'][0]['relation_to_target'],'related_subdomain')
+        self.assertEqual(result['data']['search_date_limit_days'],90)
+        self.assertEqual(report_html.source_view('urlscan',result,set())[1],'仅关联子域名')
+
+    def test_no_history_keeps_account_days_limit_not_safe(self):
+        with patch.object(audit,'req_json',side_effect=[
+            {'results':[],'search_date_limit_days':90}, {'results':[],'search_date_limit_days':90}]):
+            result=audit.urlscan_check('example.com','key')
+        self.assertEqual(result['status'],'empty')
+        self.assertEqual(result['data']['history_scope'],'none')
+        self.assertIn('90',result['summary'])
+        self.assertIn('不证明网站安全',result['summary'])
+
+    def test_report_shows_live_result_separately_from_missing_history(self):
+        record=audit.urlscan_scan_detail(detail(),UUID,'example.com')
+        r={'domain':'example.com','checked_at':'2026-10-15T12:00:00Z','report_id':'DEMO',
+           'sources':{'urlscan':audit.source('empty',data={'search_date_limit_days':90}),
+                      'urlscan_live':audit.source('ok',data={'result':record},url=URL),
+                      'dns':audit.source('ok'),'virustotal':audit.source('ok')},
+           'assessment':{'findings':[]}}
+        page=report_html.render(r)
+        self.assertIn('本次实时网页扫描',page)
+        self.assertIn('最近 90 天',page)
+        self.assertIn('扫描完成',page)
+        self.assertIn('查看本次实时扫描',page)
+
+    def test_cli_live_defaults_on_and_supports_disable(self):
+        with patch.object(audit,'audit_cmd',return_value=0) as cmd:
+            self.assertEqual(audit.main(['audit','--domain','example.com']),0)
+            self.assertFalse(cmd.call_args.args[0].no_live_scan)
+            self.assertEqual(audit.main(['audit','--domain','example.com','--no-live-scan']),0)
+            self.assertTrue(cmd.call_args.args[0].no_live_scan)
 
 if __name__=='__main__':unittest.main()
