@@ -23,6 +23,15 @@ VENDOR_DIR = ROOT / 'vendor' / 'ioc'
 MAX_BYTES = 16 * 1024 * 1024
 MAX_AGE_DAYS = 7
 
+# 已审核的下载来源前缀。镜像仅改变域名与路径前缀，指向的仍是下方 FEEDS 中
+# 逐条审核过的仓库文件；不在白名单内的 URL 一律拒绝下载。
+ALLOWED_PREFIXES = (
+    'https://raw.githubusercontent.com/',
+    'https://fastly.jsdelivr.net/gh/',
+    'https://cdn.jsdelivr.net/gh/',
+    'https://gh-proxy.com/https://raw.githubusercontent.com/',
+)
+
 # These are specifically selected public repository files, not vendor APIs.
 # Always review LICENSE + original upstream data rights before production deployment.
 FEEDS = {
@@ -33,6 +42,11 @@ FEEDS = {
         'license': 'MIT（仓库声明；请核验使用条件）',
         'kind': 'phishing_domain', 'format': 'phishshield_js',
         'min_count': 10, 'enabled_by_default': True, 'origin_group': 'phishshield_maintainer',
+        # 主源 raw.githubusercontent.com 在部分网络不可达时按顺序回退，内容同一仓库文件。
+        'mirrors': (
+            'https://gh-proxy.com/https://raw.githubusercontent.com/Lu-yanmo/phishshield/main/common/blacklist.js',
+            'https://fastly.jsdelivr.net/gh/Lu-yanmo/phishshield@main/common/blacklist.js',
+        ),
     },
     'cn_ipguard': {
         'title': 'IPGuard（中国社区攻击来源 IP 清单）',
@@ -41,6 +55,10 @@ FEEDS = {
         'license': 'CC BY 4.0（署名、保留注释、标记修改）',
         'kind': 'attacking_ip', 'format': 'ip_comment',
         'min_count': 5, 'enabled_by_default': True, 'origin_group': 'ipguard_community',
+        'mirrors': (
+            'https://gh-proxy.com/https://raw.githubusercontent.com/chxovo/IPguard/main/blacklist.txt',
+            'https://fastly.jsdelivr.net/gh/chxovo/IPguard@main/blacklist.txt',
+        ),
     },
     'cn_antiad': {
         'title': 'anti-AD（中文广告/追踪/隐私过滤，非恶意 IOC 定性）',
@@ -49,6 +67,10 @@ FEEDS = {
         'license': '仓库 MIT；聚合上游许可需要机构额外核实',
         'kind': 'ad_tracking', 'format': 'plain_domain',
         'min_count': 1000, 'enabled_by_default': True, 'origin_group': 'antiad_aggregated',
+        'mirrors': (
+            'https://gh-proxy.com/https://raw.githubusercontent.com/privacy-protection-tools/anti-AD/master/anti-ad-domains.txt',
+            'https://fastly.jsdelivr.net/gh/privacy-protection-tools/anti-AD@master/anti-ad-domains.txt',
+        ),
     },
 }
 
@@ -127,11 +149,11 @@ def connect(db=DEFAULT_DB):
 
 
 def fetch_feed(url):
-    if not url.startswith('https://raw.githubusercontent.com/'):
-        raise ValueError('仅支持事先审核的 GitHub HTTPS Raw 来源')
+    if not url.startswith(ALLOWED_PREFIXES):
+        raise ValueError('仅支持事先审核的 GitHub HTTPS Raw 来源及其镜像')
     headers = {'User-Agent': 'DomainEgressAudit/1.4; offline-ioc-only', 'Accept': 'text/plain'}
     # Bounded streamed downloads, no redirects, no target FQDN/IP in requests.
-    with requests.get(url, headers=headers, timeout=(5, 35), stream=True, allow_redirects=False) as resp:
+    with requests.get(url, headers=headers, timeout=(8, 60), stream=True, allow_redirects=False) as resp:
         if resp.status_code != 200:
             raise ValueError('下载失败（HTTP ' + str(resp.status_code) + '）；不替换原有规则')
         content_len = resp.headers.get('Content-Length')
@@ -156,7 +178,18 @@ def update_feeds(db=DEFAULT_DB, *, names=None, fetcher=None):
             continue
         cfg = FEEDS[name]
         try:
-            raw = fetcher(cfg['url'])
+            # 主源优先；仅在主源失败时按顺序回退镜像，镜像内容必须是同一已审核仓库文件。
+            raw, used_url, last_exc = None, cfg['url'], None
+            for candidate in (cfg['url'], *cfg.get('mirrors', ())):
+                try:
+                    raw = fetcher(candidate)
+                    used_url = candidate
+                    break
+                except (ValueError, requests.RequestException, UnicodeError, OSError, sqlite3.Error) as exc:
+                    last_exc = exc
+                    continue
+            if raw is None:
+                raise last_exc
             if len(raw) > MAX_BYTES or len(raw) < 10:
                 raise ValueError('下载的数据为空或大小异常')
             txt = raw.decode('utf-8-sig', errors='strict')
@@ -168,8 +201,8 @@ def update_feeds(db=DEFAULT_DB, *, names=None, fetcher=None):
                 c.executemany('INSERT INTO indicators(feed, indicator, details) VALUES(?, ?, ?)',
                               ((name, value, info) for value, info in rows))
                 c.execute('INSERT OR REPLACE INTO feed_meta(feed,updated_at,source_url,project_url,license,sha256,item_count) VALUES(?,?,?,?,?,?,?)',
-                          (name, now_iso(), cfg['url'], cfg['project'], cfg['license'], sha256(raw).hexdigest(), len(rows)))
-            result[name] = {'status': 'ok', 'count': len(rows), 'sha256': sha256(raw).hexdigest(), 'updated_at': now_iso()}
+                          (name, now_iso(), used_url, cfg['project'], cfg['license'], sha256(raw).hexdigest(), len(rows)))
+            result[name] = {'status': 'ok', 'count': len(rows), 'sha256': sha256(raw).hexdigest(), 'updated_at': now_iso(), 'source': used_url}
         except (ValueError, requests.RequestException, UnicodeError, OSError, sqlite3.Error) as exc:
             result[name] = {'status': 'error', 'error': f'{type(exc).__name__}: {str(exc)[:140]}',
                             'previous_cache_preserved': True}
