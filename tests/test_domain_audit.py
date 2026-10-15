@@ -118,7 +118,7 @@ class TestDomainAudit(unittest.TestCase):
         report['assessment'] = audit.evaluate(report)
         md = audit.render_markdown(report)
         self.assertIn('互联网外联域名安全评估报告', md)
-        self.assertIn('人工复核记录', md)
+        self.assertIn('无人值守执行记录', md)
         self.assertIn('准入建议', md)
         self.assertNotIn('自动批准：是', md)
 
@@ -320,7 +320,7 @@ class TestDomainAudit(unittest.TestCase):
              patch.object(audit, 'urlscan_check', return_value=audit.source('not_configured')), \
              patch.object(audit, 'tls_check', return_value=audit.source('skipped')):
             report = audit.build_report('example.com', 'example.com', {'usage_type': 'business'}, env={})
-        self.assertEqual(report['schema_version'], '1.4.0')
+        self.assertEqual(report['schema_version'], '1.5.0')
         self.assertEqual(len(report['evidence_ledger']), 13)
         self.assertIn('cdn.vendor.com', [x['hostname'] for x in report['asset_inventory']])
         md = audit.render_markdown(report)

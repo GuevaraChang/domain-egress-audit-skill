@@ -111,7 +111,7 @@ HTTP Header：`api-key: <您的密钥>`
 python scripts/domain_audit.py init --usage business  # 商业用途自动跳过 VirusTotal
 python scripts/domain_audit.py doctor
 python scripts/domain_audit.py doctor --online
-python scripts/domain_audit.py audit --domain ifuwuyun.com --business-file business_context.json
+python scripts/domain_audit.py audit --domain ifuwuyun.com
 ```
 
 **受管网络环境建议**：第三方查询最好由获批的运维管理/情报查询节点执行，并设置允许的访问域名、出口审计和调用限额；不要直接从生产内网业务服务器运行此脚本。报告本地留存，不要外传包含内部业务背景的文档。

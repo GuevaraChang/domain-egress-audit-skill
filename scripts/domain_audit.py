@@ -27,7 +27,7 @@ import local_ioc
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV = ROOT / '.env'
-UA = 'DomainEgressAuditSkill/1.4 (defensive FQDN due-diligence; contact: local-admin)'
+UA = 'DomainEgressAuditSkill/1.5 (defensive FQDN due-diligence; contact: local-admin)'
 TIMEOUT = 9
 RDAP_BOOTSTRAP = 'https://data.iana.org/rdap/dns.json'
 OTX_BASE = 'https://otx.alienvault.com/api/v1/indicators/domain'
@@ -569,7 +569,8 @@ def tls_check(host, port, ips, enabled=False):
 
 def read_context(path, host):
     if not path:
-        return {}, '未提供业务上下文文件'
+        return {'target_fqdn': host,
+                'data_classification': 'unknown', 'context_status': 'not_provided'}, None
     obj = json.loads(Path(path).read_text(encoding='utf-8'))
     if not isinstance(obj, dict):
         raise ValueError('业务上下文必须是 JSON 对象')
@@ -720,6 +721,8 @@ def attach_baseline(report, previous):
             'detail': f"与基线相比有 {len(comparison['changes'])} 项变化；仅为待核查信号，不是恶意证据。"})
         report['assessment']['risk_label'] = '存在风险信号，需人工调查'
         report['assessment']['decision'] = '暂缓放通；先确认历史变化及其他审批资料'
+    if 'technical_assessment' in report:
+        report['technical_assessment'] = technical_assessment(report)
     return report
 
 def evaluate(report):
@@ -876,6 +879,74 @@ def evaluate(report):
             'pending_items': sorted(set(pending)), 'automatic_approval': False}
 
 
+def technical_assessment(report):
+    """Deterministic machine summary; does not pretend to approve egress."""
+    src = report['sources']
+    checks = ('rdap', 'dns', 'ripestat', 'crtsh', 'otx', 'urlscan', 'local_ioc',
+              'threatbook_api', 'virustotal')
+    states = {k: (src.get(k) or {}).get('status', 'not_available') for k in checks}
+    positive = [f for f in report['assessment']['findings']
+                if f.get('severity') in ('high', 'medium') and f.get('type') not in ('data_egress',)]
+    core = ('rdap', 'dns', 'ripestat', 'crtsh', 'local_ioc')
+    coverage = all(states[k] in ('ok', 'empty') for k in core)
+    if positive:
+        verdict = 'review_signals_detected'
+        label = '已检测到风险线索（自动分析，需核实）'
+    elif not coverage:
+        verdict = 'insufficient_technical_evidence'
+        label = '自动技术证据不足，无法排除风险'
+    else:
+        verdict = 'no_obvious_signals_in_checked_sources'
+        label = '已完成主要自动检查，未触发明显技术风险信号（不代表安全）'
+    return {
+        'verdict': verdict, 'label': label,
+        'source_statuses': states,
+        'core_sources_complete': coverage,
+        'signal_types': sorted({f.get('type') for f in positive}),
+        'business_data_risk': 'not_assessed' if report['business_context'].get('context_status') == 'not_provided' else 'provided_information_only',
+        'access_authorization': 'not_granted', 'automatic_approval': False,
+        'limitations': '公开情报和已加载 IOC 的自动判断；业务必要性、数据分类、真实归属和授权控制不能仅靠公网域名信息证明。',
+    }
+
+
+def auto_refresh_local_ioc(db, max_age_days=7):
+    """Update approved default feeds only when missing/stale, without target disclosure."""
+    now = datetime.now(timezone.utc)
+    rows = {r['feed']: r for r in local_ioc.list_feeds(db=db)}
+    due = []
+    for name, cfg in local_ioc.FEEDS.items():
+        if not cfg['enabled_by_default']:
+            continue
+        row = rows.get(name)
+        updated = parse_iso(row.get('updated_at')) if row else None
+        if not updated or (now - updated).total_seconds() >= max_age_days * 86400:
+            due.append(name)
+    if not due:
+        return {'status': 'fresh_cache', 'checked_at': utc_now(), 'refreshed': [], 'errors': {}, 'target_sent': False}
+    outcome = local_ioc.update_feeds(db=db, names=due)
+    errors = {k: v.get('error', '未知失败') for k, v in outcome.items() if v.get('status') != 'ok'}
+    return {'status': 'partial' if errors else 'updated', 'checked_at': utc_now(),
+            'refreshed': [k for k,v in outcome.items() if v.get('status') == 'ok'],
+            'attempted': due, 'errors': errors, 'target_sent': False}
+
+
+def locate_baseline(output_dir, host):
+    """Find most recent valid report for exactly this FQDN, no human input."""
+    folder = Path(output_dir)
+    if not folder.is_dir():
+        return None, None
+    safe = re.sub(r'[^a-z0-9.-]', '_', host)
+    candidates = sorted(folder.glob(safe + '_*.json'), reverse=True)
+    for path in candidates[:40]:
+        try:
+            item = json.loads(path.read_text(encoding='utf-8'))
+            if item.get('domain') == host and isinstance(item.get('sources'), dict):
+                return item, str(path)
+        except (ValueError, OSError, UnicodeError):
+            continue
+    return None, None
+
+
 def md(value):
     return str(value if value is not None else '未取得').replace('|', '\\|').replace('\n', ' ')[:500]
 
@@ -892,6 +963,8 @@ def render_markdown(report):
         f"- **评估范围**：外联前公开证据调查；不包含漏洞扫描、渗透测试或完整商业情报覆盖",
         f"- **综合结论**：**{md(report['assessment']['risk_label'])}**",
         f"- **准入建议**：**{md(report['assessment']['decision'])}**",
+        f"- **自动技术结论**：**{md((report.get('technical_assessment') or {}).get('label', '旧版无此结果'))}**",
+        '- **外联访问授权**：未授予（此报告不能自动生成网络放通权限）',
         '',
         '## 一、业务用途与访问边界', '',
         '| 字段 | 内容 |', '| --- | --- |',
@@ -964,7 +1037,7 @@ def render_markdown(report):
     for row in local_info.get('feeds', []):
         fmt.append(f"| {md(row.get('feed'))} | {md(row.get('kind'))} | {md(row.get('updated_at'))} | {md(row.get('entries'))} | {md(row.get('stale'))} | {md(row.get('license'))}；{md(row.get('project'))} |")
     if not local_info.get('feeds'):
-        fmt.append('| 未建立本地缓存 | — | — | — | — | 请先执行 `ioc-update`，不能把未检测理解为 0 命中 |')
+        fmt.append('| 未建立本地缓存 | — | — | — | — | 自动更新失败或被禁用，不能把未检测理解为 0 命中 |')
     fmt.extend(['', '| 命中来源 | IOC | 匹配关系 | 提示类别 | 数据时效 |',
                 '| --- | --- | --- | --- | --- |'])
     for row in local_info.get('matched', []):
@@ -1008,16 +1081,18 @@ def render_markdown(report):
         fmt.append(f'- [ ] {md(item)}')
     if not report['assessment']['pending_items']:
         fmt.append('- 自动化审查未发现待补充字段；仍须按单位制度人工审批。')
-    fmt.extend(['', '## 五、人工复核记录（请评审人填写）', '',
-                '- Talos 查询结果 / 时间 / 截图或工单附件：________',
-                '- 国内情报交叉验证：微步 X / 奇安信 / 腾讯的网页查询截图、完整 FQDN 和时间：________',
-                '- 各平台是否为同一原始 IOC 的转载，是否存在误报：________',
-                '- 供应商提供的域名归属证据：________',
-                '- 实际 HTTPS/API 访问路径、跳转目标及数据清单核实：________',
-                '- 网络出口代理/白名单/最小权限策略核实：________',
-                '- 安全评审人：________　复核日期：________',
-                '- 最终审批结论（人工填写）：________',
+    execution = report.get('execution') or {}
+    fmt.extend(['', '## 五、无人值守执行记录', '',
+                '- 本次评估无需提供 `business_context.json`、国内人工证据文件或 API Key。',
+                '- 本地 IOC 更新：' + md((execution.get('ioc_refresh') or {}).get('status', '旧版未记录')),
+                '- IOC 更新失败详情：' + md((execution.get('ioc_refresh') or {}).get('errors', {})),
+                '- 自动基线来源：' + md(execution.get('baseline_file')),
+                '- 自动化检查状态：' + md((report.get('technical_assessment') or {}).get('source_statuses')),
+                '- 业务与数据风险：' + md((report.get('technical_assessment') or {}).get('business_data_risk', 'not_assessed')),
+                '- 运行结果：报告已生成；若有检查失败会如实标明，不会伪造安全结论。',
+                '- 重要：报告能够无人值守生成，但公开技术情报不能推断内部数据流或自动授予防火墙放通权限。',
                 '', '## 六、审计声明', '',
+
                 '1. 本报告仅基于执行时取得的公开数据和提交的业务上下文，不是安全认证。',
                 '2. 查询失败、未配置、无记录、未发现恶意，均不能理解为“安全”。',
                 '3. OTX Pulse、共享云 IP 的间接关联等不得单独作为恶意定性依据。',
@@ -1027,7 +1102,7 @@ def render_markdown(report):
                 '7. 企业/银行/其他商业业务流程自动跳过 VirusTotal Public API（不调用）；不影响其他免费查询，跳过不等于低风险。',
                 '8. 国内网页证据来自人工填写，程序未抓取奇安信、腾讯、微步网页，不得声称已自动检索。',
                 '9. 微步 API 默认跳过；只有接口额度且机构用途获授权才允许请求；免费网页不等于免费域名 API。',
-                '10. 本地 IOC 规则需提前更新；PhishShield/IPGuard/anti-AD 可能出现误报或上游许可差异，命中不自动等于恶意；anti-AD 为广告/追踪类来源，不属于安全恶意 IOC 证明。',
+                '10. audit 自动按需更新默认本地 IOC 源；PhishShield/IPGuard/anti-AD 可能出现误报或上游许可差异，命中不自动等于恶意；anti-AD 为广告/追踪类来源，不属于安全恶意 IOC 证明。',
                 '', '## 七、机器可读证据', '',
                 '同名 `.json` 文件包含检查状态、结构化证据、风险信号和待办事项。', ''])
     return '\n'.join(fmt)
@@ -1052,7 +1127,7 @@ def build_report(host, registered, ctx, tls_probe=False, env=None, domestic_revi
                                               db=ioc_db or local_ioc.DEFAULT_DB),
     }
     instant = datetime.now(timezone.utc)
-    report = {'schema_version': '1.4.0',
+    report = {'schema_version': '1.5.0',
               'report_id': 'EDA-' + instant.strftime('%Y%m%dT%H%M%SZ') + '-' + re.sub(r'[^a-z0-9]+', '-', host)[:48],
               'checked_at': instant.isoformat(timespec='seconds'), 'domain': host,
               'registered_domain': registered, 'vt_usage': vt_usage,
@@ -1062,6 +1137,7 @@ def build_report(host, registered, ctx, tls_probe=False, env=None, domestic_revi
     report['evidence_ledger'], report['evidence_coverage'] = evidence_ledger(report)
     report['asset_inventory'] = build_asset_inventory(report)
     report['assessment'] = evaluate(report)
+    report['technical_assessment'] = technical_assessment(report)
     return report
 
 
@@ -1171,38 +1247,60 @@ def doctor_cmd(args):
 
 
 def audit_cmd(args):
+    """One-command unattended collection & reporting; no interactive prompts."""
     host, registered = validated_domain(args.domain)
     if args.registered_domain:
         override, _ = validated_domain(args.registered_domain)
         if host != override and not host.endswith('.' + override):
             raise ValueError('--registered-domain 必须是目标 FQDN 的父域名')
         registered = override
-    ctx, note = read_context(args.business_file, host)
-    if note:
-        print('提醒：未提供业务背景文件，报告将保持“无法准入/待补证”。')
+    ctx, _ = read_context(args.business_file, host)
     if args.tls_probe:
-        print('提示：你已主动要求 TLS 探测，将与目标公网 IP 建立 TCP/TLS 连接。')
+        print('提示：已选择主动 TLS 探测，会与公网目标建立连接（不发送 HTTP 请求）。')
     usage = effective_vt_usage(read_env(), ctx)
     if usage == 'business':
-        print('VirusTotal：商业/银行业务用途，按免费 API 使用限制自动跳过，绝不发起 VirusTotal 请求。')
-    print(f'检查 {host}（注册域 {registered}）；仅会把公开 FQDN/IP 发送到已启用且获许可的第三方数据源。')
+        print('VirusTotal：商业/银行业务自动跳过免费 Public API。')
+    print(f'正在自动评估 {host}（注册域 {registered}）；无人工问答、不发送内部业务数据。')
+    db = getattr(args, 'ioc_db', str(local_ioc.DEFAULT_DB))
+    if getattr(args, 'no_auto_ioc_update', False):
+        sync = {'status': 'disabled_by_argument', 'checked_at': utc_now(), 'target_sent': False}
+    else:
+        try:
+            sync = auto_refresh_local_ioc(db)
+        except (OSError, ValueError, local_ioc.sqlite3.Error) as exc:
+            sync = {'status': 'error', 'checked_at': utc_now(), 'errors': {'local_ioc': str(exc)[:200]}, 'target_sent': False}
+    if sync['status'] in ('partial', 'error'):
+        print('部分 IOC 更新失败，保留历史缓存并在报告中标明；继续执行其他检查。')
     domestic_reviews = load_domestic_evidence(getattr(args, 'domestic_evidence', None), host)
-    report = build_report(host, registered, ctx, args.tls_probe, domestic_reviews=domestic_reviews, ioc_db=getattr(args, 'ioc_db', None))
-    if getattr(args, 'baseline', None):
-        old_report = json.loads(Path(args.baseline).expanduser().read_text(encoding='utf-8'))
-        attach_baseline(report, old_report)
+    report = build_report(host, registered, ctx, args.tls_probe,
+                          domestic_reviews=domestic_reviews, ioc_db=db)
     out = Path(args.output).expanduser()
     out.mkdir(parents=True, exist_ok=True)
+    previous, baseline_path = (None, None)
+    if getattr(args, 'baseline', None):
+        baseline_path = str(Path(args.baseline).expanduser())
+        previous = json.loads(Path(baseline_path).read_text(encoding='utf-8'))
+    elif not getattr(args, 'no_auto_baseline', False):
+        previous, baseline_path = locate_baseline(out, host)
+    if previous is not None:
+        attach_baseline(report, previous)
+    report['execution'] = {'mode': 'unattended', 'ioc_refresh': sync,
+                           'baseline_file': baseline_path, 'manual_input_required': False,
+                           'api_keys_optional': True}
     safe = re.sub(r'[^a-z0-9.-]', '_', host)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     base = out / f'{safe}_{stamp}'
+    counter = 1
+    while Path(str(base) + '.json').exists() or Path(str(base) + '.md').exists():
+        base = out / f'{safe}_{stamp}_{counter:02d}'
+        counter += 1
     jfile = Path(str(base) + '.json')
     mfile = Path(str(base) + '.md')
     jfile.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     mfile.write_text(render_markdown(report), encoding='utf-8')
-    print('风险状态：' + report['assessment']['risk_label'])
-    print('准入建议：' + report['assessment']['decision'])
-    print('待办事项：' + str(len(report['assessment']['pending_items'])))
+    print('自动技术结论：' + report['technical_assessment']['label'])
+    print('准入状态：未授权自动放通')
+    print('待补证据：' + str(len(report['assessment']['pending_items'])))
     print('JSON:', jfile)
     print('Markdown:', mfile)
     return 0
@@ -1266,8 +1364,10 @@ def main(argv=None):
     s_audit = sub.add_parser('audit', help='查询指定 FQDN，生成 JSON/Markdown 双报告')
     s_audit.add_argument('--domain', required=True, help='例如 ifuwuyun.com；不要传完整 URL')
     s_audit.add_argument('--registered-domain', help='复杂多级后缀时手动指定经核实的注册域名')
-    s_audit.add_argument('--business-file', help='业务上下文 JSON（只保留在本地报告中）')
-    s_audit.add_argument('--baseline', help='上一次本地 JSON 报告；对比 DNS IP/CNAME 和注册商变化')
+    s_audit.add_argument('--business-file', help='可选的业务上下文 JSON；默认无人值守，不需要此文件')
+    s_audit.add_argument('--baseline', help='可选的指定历史报告；默认自动使用 reports 中最新同域名 JSON')
+    s_audit.add_argument('--no-auto-baseline', action='store_true', help='关闭自动历史基线比较')
+    s_audit.add_argument('--no-auto-ioc-update', action='store_true', help='不尝试联网更新本地 IOC（使用现有缓存）')
     s_audit.add_argument('--domestic-evidence', help='国内威胁情报网页人工复核记录 JSON；仅本地导入，不抓取网页')
     s_audit.add_argument('--output', default=str(ROOT / 'reports'), help='报告输出目录')
     s_audit.add_argument('--tls-probe', action='store_true', help='主动连接目标公网 IP 测试 TLS（默认禁用）')

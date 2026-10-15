@@ -35,7 +35,7 @@ python scripts/domain_audit.py ioc-update --include-adtracking --license-reviewe
 # 银行合规环境可采用经过安全传递的本地文件导入
 python scripts/domain_audit.py ioc-import --feed cn_ipguard --file /approved/blacklist.txt
 # 整体报告会自动合并 local_ioc 到证据链与交叉矩阵
-python scripts/domain_audit.py audit --domain ifuwuyun.com --business-file business_context.json
+python scripts/domain_audit.py audit --domain ifuwuyun.com
 ```
 
 指定的 `--ip` 必须是实际核实过的公网 IP；不要手工填写上述示意用的文档保留地址作为真实结论。

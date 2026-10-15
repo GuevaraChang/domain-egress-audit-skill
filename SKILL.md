@@ -3,11 +3,11 @@ name: domain-egress-audit
 description: 当用户想确认一个互联网外部域名是否适合企业/银行内网服务器访问、想申请配置免费威胁情报 API、检查域名注册信息/DNS/ASN/历史扫描，或需要生成外联域名准入评估报告时，按三阶段操作。严格区分威胁情报和访问授权，不得自动放通。
 ---
 
-# Domain Egress Audit Skill · 互联网外联域名安全评估（v1.4）
+# Domain Egress Audit Skill · 互联网外联域名安全评估（v1.5）
 
 ## 职责与原则
 
-这个 Skill 帮助网络/DNS/安全运维人员完成 **引导配置免费 API → 查询外部 FQDN → 生成标准化证据报告**。面向企业及银行网络外联审批，以**人工复核和最小权限准入**为最终控制点。
+这个 Skill 帮助网络/DNS/安全运维人员完成 **直接输入域名 → 自动选择免费且获许可的数据源 → 自动更新 IOC → 自动出具机器可读及 Markdown 报告**。面向企业及银行网络外联审批，以**人工复核和最小权限准入**为最终控制点。
 
 - **不需要付费 API**。无账号可执行 RDAP、DNS、RIPEstat、crt.sh；可选接入 OTX、urlscan.io 免费额度内的 API。保留国内微步 X、奇安信、腾讯安全人工情报交叉核验及有权才接入的微步 API；新增中国开源社区 IOC 本地 SQLite 规则库（先下载，后纯离线匹配）。商业/机构使用应事先核实各平台条款、查询合规和跨境披露要求。
 - **VirusTotal 条件接入**：先核实用途，`business`（银行/企业/商用/客户项目）下**自动跳过注册、Key 配置及全部 VT 网络请求**，说明官方条款限制；仅明确为合规个人非商业用途时允许使用 VirusTotal Public API。仍不集成 AbuseIPDB 免费个人版。
@@ -22,9 +22,25 @@ description: 当用户想确认一个互联网外部域名是否适合企业/银
 
 当用户说「审核域名」「外联域名安全验证」「外网白名单准入」「帮我判断 ifuwuyun.com 能否放通」「引导注册威胁情报 API」「输出标准化评估报告」等，采用以下阶段。用户已经完成上一步时直接进入下一阶段，不重复询问。
 
-## 第一步：引导用户注册和申请免费 API
 
-**Agent 对话行为（首次运行）**：首先询问「本次是否属于银行、企业、商业产品/服务、客户项目或日常业务审批/安全运营？」**默认答案为“是（business）”**。无交互输入时同样认定 `business`。解释 VT 免费 Public API 不允许用于商业产品/服务及不贡献新文件的业务工作流：若为商业用途，**自动跳过 VirusTotal 注册申请与 Key 获取，不要向用户索取 VT Key，并且在后续校验中不调用 VT**。不影响其他免费数据源。只有用户明确选择合规的个人非商业用途，才提供 VT 的免费申请页面；然后告知无密钥工具与 OTX、urlscan 两个可选 Key，明确“注册与邮箱验证由用户本人操作”。随后给出 `init` 的本地配置命令。用户尚未确认办妥密钥时，停留在注册/配置引导阶段；但如果用户明确想跳过 Key，可执行零密钥基础审查。绝不索取用户把真实 Key 粘贴到聊天中。
+## 优先路径：无人值守全流程（默认，无需人工填写任何 JSON）
+
+用户只需要提供一个具体公网 FQDN。**立刻执行**（若执行环境支持），不用等待注册、人工创建 `business_context.json`、填国内网页证据或人工完成 `ioc-update`：
+
+```bash
+pip install -r requirements.txt
+python scripts/domain_audit.py audit --domain ifuwuyun.com
+```
+
+`audit` 默认执行：检查本地开源 IOC 缓存是否缺失或超过 7 天，自动更新允许的两项静态 feed（不上传目标域名）；调用无需 Key 的 RDAP/DNS/RIPEstat/crt.sh，以及已经配置并有许可的可选 API；读取已有 IOC 缓存；自动查找同一域名最近一份报告作为历史基线；生成 `reports/*.json` 和 `*.md` 并返回**自动技术结论**。无任何交互 `input()`，运行异常或缺失的可选源必须进入报告，不能声称检查成功。`init` 和 Key 申请只在用户需要更多情报覆盖时主动引导，非运行前置条件。默认模式 `business`，商业用途 VT 免费 API 永远跳过。
+
+`business_context.json` 原本是源服务器、数据类型、访问目的、供应商等内部业务审批证据。**现在完全可选**，不需要新建。未提供时 `data_classification=unknown`，内部数据/业务归属明确为 `not_assessed`，不能凭公网域名技术结果生成准入许可。用户要求无人值守意味着**自动生成报告**，并不意味着安全地自动开启银行防火墙、代理或 DNS 白名单。
+
+对未授权主动网络连接的目标默认不使用 `--tls-probe`；可执行本地只读和第三方历史情报调查。所有可选来源因许可不明会安全跳过，而不是绕过网站的人工验证或服务条款。仅当用户**明确要求申请 API**时执行下面的配置引导阶段。
+
+## 第一步（可选）：引导用户注册和申请免费 API
+
+**Agent 对话行为（用户明确希望申请 API 时）**：首先询问「本次是否属于银行、企业、商业产品/服务、客户项目或日常业务审批/安全运营？」**默认答案为“是（business）”**。无交互输入时同样认定 `business`。解释 VT 免费 Public API 不允许用于商业产品/服务及不贡献新文件的业务工作流：若为商业用途，**自动跳过 VirusTotal 注册申请与 Key 获取，不要向用户索取 VT Key，并且在后续校验中不调用 VT**。不影响其他免费数据源。只有用户明确选择合规的个人非商业用途，才提供 VT 的免费申请页面；然后告知无密钥工具与 OTX、urlscan 两个可选 Key，明确“注册与邮箱验证由用户本人操作”。随后给出 `init` 的本地配置命令。用户没有取得密钥时直接按默认无人值守路径审查，绝不因此停留或等待人工。绝不索取用户把真实 Key 粘贴到聊天中。
 
 1. 先告知用户：**零密钥也可开始**，基础数据来源是 IANA RDAP、DNS、RIPEstat、crt.sh。说明这只是基础技术检查，不足以自动证明域名安全。
 2. **VirusTotal 用途分流（优先执行）**：
@@ -58,26 +74,26 @@ description: 当用户想确认一个互联网外部域名是否适合企业/银
 8. 使用 `python scripts/domain_audit.py doctor` 验证本地配置；获准联外后执行 `python scripts/domain_audit.py doctor --online` 验证访问权限和 Key 是否可用。无法连通时先排查访问代理/网络权限，**不要**要求粘贴密钥。
 9. 查阅 `references/SERVICE_SETUP.md` 中明确的服务路径、收费/授权注意事项。**账号申请未完成、无互联网权限时允许跳过**，报告应如实体现证据缺口。
 
-## 第二步：配置好后对域名执行校验
+## 第二步：直接对域名自动执行校验（不需先配置）
 
 **Agent 对话行为（配置后）**：从用户输入中取得准确的目标 FQDN（如果用户说的是“`ifuwuyun.com`”，以该值审查，不擅自扩展到所有子域）；确认 API 检查 `doctor` 正常或注明限制；收集本地业务上下文。具备可用的执行环境时运行命令；不能运行代码/没有互联网权限时，说明未实际验证并给出用户可复制的本地运行命令。禁止编造实时 DNS、WHOIS、风险评分。
 
 1. 取得**确切 FQDN**，例如 `api.vendor.example`；不要只以二级注册域推断所有子域安全。域名与端口、CNAME、实际访问目标均需审查。
-2. 对常见后缀脚本离线估算注册域；如是特殊多级后缀，先核实注册域并传入 `--registered-domain`，避免误判。询问或使用用户提供的业务上下文：源系统、外部服务商及域名归属证明、访问用途、协议和端口、是否上传数据、数据分类、代理/白名单/日志控制、业务及数据安全审批。复制 `assets/business_context.example.json`，将其保存为本地 `business_context.json` 并填写；不得向威胁情报接口发送这些信息。
+2. 对常见后缀脚本离线估算注册域；如是特殊多级后缀，先核实注册域并传入 `--registered-domain`，避免误判。询问或使用用户提供的业务上下文：源系统、外部服务商及域名归属证明、访问用途、协议和端口、是否上传数据、数据分类、代理/白名单/日志控制、业务及数据安全审批。业务上下文是可选资料，不需要自动创建或填写 `business_context.json`。缺少的信息报告标为 `unknown/not_assessed`；不得向威胁情报接口发送内部资料。
 3. 执行：
 
    ```bash
-   python scripts/domain_audit.py audit --domain ifuwuyun.com --business-file business_context.json
+   python scripts/domain_audit.py audit --domain ifuwuyun.com
    ```
 
-   未准备业务上下文时可省略 `--business-file`，但报告结论必须是 **证据不足，无法准入**。
+   默认无需 `--business-file`，能得到自动技术评估结果；业务与准入授权维度必须明确 **not_assessed/not_granted**，不假装已获授权。
 4. 默认执行的免费检查：
    - 通过 IANA RDAP bootstrap 取得注册局 RDAP（创建日期、注册商、到期时间、域名状态）。
    - 当前主机本地 DNS 解析（A、AAAA、CNAME、NS；注意 split-horizon 和递归解析器视角）。
    - 针对最多 4 个解析 IP 查询 RIPEstat 网络前缀/ASN（该结果不是安全信誉评分）。
    - 查询 crt.sh 公开 CT 证书历史（不代表当前服务证书有效）。
    - 如已配置 Key，查询 OTX 域名 Pulse 关联、urlscan 已有历史扫描；只采集摘要和证据 URL。
-   - **本地 IOC 精确匹配（v1.4，自动）**：脚本读取本地 SQLite 快照，不联网拉取规则；区分钓鱼候选、解析 IP 弱关联、广告/跟踪上下文，输出 `sources.local_ioc`。默认报告有更新时间、哈希、数据类别、匹配强弱、是否过期和授权说明；没有缓存/更新失败不能判定未命中。
+   - **本地 IOC 精确匹配（v1.4，自动）**：脚本先在需要时自动下载/刷新默认允许的静态规则，再读取本地 SQLite 快照；区分钓鱼候选、解析 IP 弱关联、广告/跟踪上下文，输出 `sources.local_ioc`。默认报告有更新时间、哈希、数据类别、匹配强弱、是否过期和授权说明；没有缓存/更新失败不能判定未命中。
    - **国内交叉核验**：`--domestic-evidence assets/domestic_evidence.example.json` 加载业务方/安全人员**人工查询结果**；CLI 只验证结构、精确 FQDN、核查时间和证据引用，并合并成跨平台风险矩阵，不会抓取网页。示例 JSON 是合成模板，**不能用作真实审批凭据**。银行使用时编辑为真实证据放在受控路径。
    - **微步域名 API（可选）**：默认不调用；当用户明确核实接口可用免费额度及机构使用许可并本地配置 Key + 授权开关时，才会将精确公网 FQDN 发往官方接口。微步实验室/奖励情报与转载开源情报分开，不能把转载 OTX 再算作一条独立来源。
    - **仅 `VT_USAGE=noncommercial` 且业务上下文未声明商业用途，且 VT Key 已配置**时，调用 VirusTotal v3 域名现有检测报告，获取恶意/可疑统计；其他情况明确记录 `skipped` / `not_configured` 而不请求 VT。用户选择银行或商业用途时无论有没有 VT Key 都必须跳过。
@@ -89,9 +105,9 @@ description: 当用户想确认一个互联网外部域名是否适合企业/银
 
 ## 第三步：根据结果生成标准化验证报告
 
-**Agent 对话行为（完成采集后）**：只使用 CLI 真实返回的 JSON 证据填报，严格列出每个数据源的成功/失败/未配置、查询时间、原始证据链接；依据规则输出“风险信号判断”与“准入审批建议”两项独立结论。不可因无恶意命中而认定安全。最后交付报告文件与人工审核待办项，不自动执行防火墙策略。
+**Agent 对话行为（完成采集后）**：只使用 CLI 真实返回的 JSON 证据填报，严格列出每个数据源的成功/失败/未配置、查询时间、原始证据链接；依据规则输出“风险信号判断”与“准入审批建议”两项独立结论。不可因无恶意命中而认定安全。最后交付机器技术结论、真实缺口及报告文件，不额外要求用户填报人工网页情报；不自动执行防火墙策略。
 
-1. CLI 自动在 `reports/` 生成同名 **Markdown 审查报告 + JSON 原始结构化证据**（schema v1.4）。输出增加 `evidence_ledger`（来源编号、状态、检查/观察时间、解释限制）、`evidence_coverage`（完整性和过时警示）、`asset_inventory`（被动发现的依赖主机及归属置信度）和可选 `baseline_comparison`（历史差异），并保留审批意见与人工签字栏。
+1. CLI 自动在 `reports/` 生成同名 **Markdown 审查报告 + JSON 原始结构化证据**（schema v1.5）。输出增加 `evidence_ledger`（来源编号、状态、检查/观察时间、解释限制）、`evidence_coverage`（完整性和过时警示）、`asset_inventory`（被动发现的依赖主机及归属置信度）和可选 `baseline_comparison`（历史差异），并保留审批意见与人工签字栏。
 2. 对国内情报使用 `domestic_cross_validation.matrix[]` 展示**微步 X、奇安信、腾讯及已缓存的开源 IOC feed**来源状态、原始判断、复核时间和证据引用；一方命中另一方未命中、网页无结果或来源疑似共享时，提示安全人员调查，绝不自动“投票放通”。
 3. 审查本地 IOC 的 `feed_updated_at`、`stale`、`origin_group` 和精确 FQDN/共享 IP 匹配类型，区分本地规则**是否加载成功**与**是否命中**。不能把 PhishShield + anti-AD + IPGuard 直接当作三家独立恶意厂商。
 4. 审查每个数据源的 `status`：`ok` / `empty` / `error` / `not_configured` / `skipped`。不得把查询失败当作零命中；证据来源与时间必须保留。
@@ -111,11 +127,11 @@ python scripts/domain_audit.py ioc-update  # 首次下载国内 IOC；只读公�
 python scripts/domain_audit.py ioc-status
 python scripts/domain_audit.py init
 python scripts/domain_audit.py doctor --online
-python scripts/domain_audit.py audit --domain ifuwuyun.com --business-file business_context.json --domestic-evidence domestic_evidence.json
+python scripts/domain_audit.py audit --domain ifuwuyun.com --domestic-evidence domestic_evidence.json
 # 复核：与上一次本地 JSON 结果进行非恶意定性的差异对比
-# python scripts/domain_audit.py audit --domain ifuwuyun.com --business-file business_context.json --baseline reports/上次的报告.json
+# python scripts/domain_audit.py audit --domain ifuwuyun.com --baseline reports/上次的报告.json
 # 主动探测必须获授权（否则不要加）：
-# python scripts/domain_audit.py audit --domain ifuwuyun.com --business-file business_context.json --tls-probe
+# python scripts/domain_audit.py audit --domain ifuwuyun.com --tls-probe
 ```
 
 运行前请阅读 `README.md`、`references/SERVICE_SETUP.md`。本项目是审核辅助工具，不替代银行网络准入、安全、数据保护和第三方供应商管理制度。
