@@ -25,10 +25,11 @@ import requests
 # 支持 importlib 按绝对路径加载 CLI（单元测试 / Agent 容器）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import report_html
+import local_ioc
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV = ROOT / '.env'
-UA = 'DomainSafetySkill/1.8 (read-only domain inspection)'
+UA = 'DomainSafetySkill/1.9 (read-only domain inspection)'
 TIMEOUT = 9
 RDAP_BOOTSTRAP = 'https://data.iana.org/rdap/dns.json'
 URLSCAN_SEARCH = 'https://urlscan.io/api/v1/search/'
@@ -428,6 +429,7 @@ def evidence_ledger(report):
         'urlscan': ('urlscan', '公开历史扫描，可能过时/样本有偏', 'latest_scan'),
         'virustotal': ('VirusTotal', '第三方检测统计，不等于恶意定性；某些用途自动跳过', 'last_analysis_date'),
         'tls': ('可选 TLS 探测', '仅在明确授权时可做的实时目标连接', None),
+        'local_ioc': ('开源本地安全名单', '离线匹配公开名单；域名精确匹配与共享 IP 弱关联不同，广告追踪不等于恶意', None),
     }
     ledger = []
     status_counts = {k: 0 for k in ('ok', 'empty', 'error', 'not_configured', 'skipped')}
@@ -558,6 +560,32 @@ def evaluate(report):
                              'detail': f'urlscan 历史记录中有 {len(redirects)} 条跨域跳转，需要判断跳转目标是否属于批准业务'})
     elif us['status'] in ('not_configured', 'error') and ctx.get('manual_threat_review_completed') is not True:
         pending.append('urlscan 历史数据未查询到')
+    # 本地缓存中每个命中都记录来源；禁止把广告名单或共享 IP 自动定性恶意。
+    local = src.get('local_ioc') or {}
+    local_data = local.get('data') or {}
+    local_ledger_id = next((e['id'] for e in report.get('evidence_ledger', []) if e.get('source') == 'local_ioc'), None)
+    if local.get('status') != 'ok':
+        pending.append('本地安全名单暂时无法使用')
+    else:
+        if any(f.get('stale') for f in local_data.get('feeds', [])):
+            pending.append('本地 IOC 规则存在过期源（默认超过 7 天）：先更新并复核旧数据命中')
+        active_matches = [m for m in local_data.get('matched', []) if not m.get('stale')]
+        for kind, code, sev, confidence, description in [
+            ('phishing_domain', 'local_phishing_ioc', 'medium', 'medium', '钓鱼域名社区名单精确 FQDN 命中'),
+            ('attacking_ip', 'local_ip_association', 'medium', 'low', '解析 IP 在社区攻击来源名单中出现（CDN/共享 IP 弱关联）'),
+            ('ad_tracking', 'local_adtracking', 'low', 'context_only', '域名出现在广告/追踪过滤表，不能解释为恶意域名')
+        ]:
+            relevant = [m for m in active_matches if m['kind'] == kind]
+            if relevant:
+                findings.append({'severity':sev,'type':code,'confidence':confidence,
+                                 'evidence_ids':[local_ledger_id] if local_ledger_id else [],
+                                 'detail': description + '：' + ', '.join(m['feed'] + ' [' + m['indicator'] + ']' for m in relevant[:5]) + '；必须人工复核源证据及误报'})
+                if sev == 'medium':
+                    pending.append('本地 IOC 发现待核查线索：核实是否为真实攻击资产、是否仍有效及是否共享服务')
+        stale_matches = [m for m in local_data.get('matched', []) if m.get('stale')]
+        if stale_matches:
+            pending.append('本地 IOC 历史过期缓存曾命中，需更新验证；不把过期名单当作实时恶意情报')
+
     tls = src['tls']
     if tls['status'] == 'error':
         findings.append({'severity': 'medium', 'type': 'tls_probe_failed', 'confidence': 'high', 'evidence_ids': ids('tls'),
@@ -598,11 +626,11 @@ def evaluate(report):
 def technical_assessment(report):
     """Deterministic machine summary; does not pretend to approve egress."""
     src = report['sources']
-    checks = ('rdap', 'dns', 'ripestat', 'crtsh', 'urlscan', 'virustotal', 'tls')
+    checks = ('rdap', 'dns', 'ripestat', 'crtsh', 'urlscan', 'local_ioc', 'virustotal', 'tls')
     states = {k: (src.get(k) or {}).get('status', 'not_available') for k in checks}
     positive = [f for f in report['assessment']['findings']
                 if f.get('severity') in ('high', 'medium') and f.get('type') not in ('data_egress',)]
-    core = ('rdap', 'dns', 'ripestat', 'crtsh')
+    core = ('rdap', 'dns', 'ripestat', 'crtsh', 'local_ioc')
     coverage = all(states[k] in ('ok', 'empty') for k in core)
     if positive:
         verdict = 'review_signals_detected'
@@ -623,6 +651,26 @@ def technical_assessment(report):
         'limitations': '公开情报的自动判断；业务必要性、数据分类、真实归属和授权控制不能仅靠公网域名信息证明。',
     }
 
+
+def auto_refresh_local_ioc(db, max_age_days=7):
+    """Update approved default feeds only when missing/stale, without target disclosure."""
+    now = datetime.now(timezone.utc)
+    rows = {r['feed']: r for r in local_ioc.list_feeds(db=db)}
+    due = []
+    for name, cfg in local_ioc.FEEDS.items():
+        if not cfg['enabled_by_default']:
+            continue
+        row = rows.get(name)
+        updated = parse_iso(row.get('updated_at')) if row else None
+        if not updated or (now - updated).total_seconds() >= max_age_days * 86400:
+            due.append(name)
+    if not due:
+        return {'status': 'fresh_cache', 'checked_at': utc_now(), 'refreshed': [], 'errors': {}, 'target_sent': False}
+    outcome = local_ioc.update_feeds(db=db, names=due)
+    errors = {k: v.get('error', '未知失败') for k, v in outcome.items() if v.get('status') != 'ok'}
+    return {'status': 'partial' if errors else 'updated', 'checked_at': utc_now(),
+            'refreshed': [k for k,v in outcome.items() if v.get('status') == 'ok'],
+            'attempted': due, 'errors': errors, 'target_sent': False}
 
 def locate_baseline(output_dir, host):
     """Find most recent valid report for exactly this FQDN, no human input."""
@@ -665,7 +713,7 @@ def render_markdown(report):
     return '\n'.join(lines) + '\n'
 
 
-def build_report(host, registered, ctx, tls_probe=False, env=None):
+def build_report(host, registered, ctx, tls_probe=False, env=None, ioc_db=None):
     env = env if env is not None else read_env()
     d = dns_check(host, registered)
     r = rdap_check(registered)
@@ -676,10 +724,12 @@ def build_report(host, registered, ctx, tls_probe=False, env=None):
         'crtsh': crt_check(registered),
         'urlscan': urlscan_check(host, env.get('URLSCAN_API_KEY', '')),
         'virustotal': vt_check(host, env.get('VT_API_KEY', ''), vt_usage),
+        'local_ioc': local_ioc.inspect_cached(host, [x['ip'] for x in ips if x.get('globally_routable')],
+                                              db=ioc_db or local_ioc.DEFAULT_DB),
         'tls': tls_check(host, int(ctx.get('target_port') or 443), ips, tls_probe),
     }
     instant = datetime.now(timezone.utc)
-    report = {'schema_version': '1.8.0',
+    report = {'schema_version': '1.9.0',
               'report_id': 'EDA-' + instant.strftime('%Y%m%dT%H%M%SZ') + '-' + re.sub(r'[^a-z0-9]+', '-', host)[:48],
               'checked_at': instant.isoformat(timespec='seconds'), 'domain': host,
               'registered_domain': registered, 'vt_usage': vt_usage,
@@ -834,7 +884,17 @@ def audit_cmd(args):
         print('提示：已选择主动 TLS 探测，会与公网目标建立连接（不发送 HTTP 请求）。')
     usage = effective_vt_usage(read_env(), ctx)
     print(f'正在检查 {host}，检查完成后会生成易读的 HTML 报告。')
-    report = build_report(host, registered, ctx, args.tls_probe)
+    db = getattr(args, 'ioc_db', str(local_ioc.DEFAULT_DB))
+    if getattr(args, 'no_auto_ioc_update', False):
+        sync = {'status': 'disabled_by_argument', 'checked_at': utc_now(), 'target_sent': False}
+    else:
+        try:
+            sync = auto_refresh_local_ioc(db)
+        except (OSError, ValueError, local_ioc.sqlite3.Error) as exc:
+            sync = {'status': 'error', 'checked_at': utc_now(), 'errors': {'local_ioc': str(exc)[:200]}, 'target_sent': False}
+    if sync['status'] in ('partial', 'error'):
+        print('本地 IOC 名单更新不完整：保留历史缓存，并在报告中说明；继续其他检查。')
+    report = build_report(host, registered, ctx, args.tls_probe, ioc_db=db)
     out = Path(args.output).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     previous, baseline_path = (None, None)
@@ -849,7 +909,7 @@ def audit_cmd(args):
     user_summary = report_html.summarize(report)
     report['assessment']['risk_label'] = user_summary['title']
     report['assessment']['decision'] = user_summary['recommendation']
-    report['execution'] = {'mode': 'unattended',
+    report['execution'] = {'mode': 'unattended', 'ioc_refresh': sync,
                            'baseline_file': baseline_path, 'manual_input_required': False,
                            'api_keys_optional': True}
     safe = re.sub(r'[^a-z0-9.-]', '_', host)
@@ -873,6 +933,50 @@ def audit_cmd(args):
     return 0
 
 
+def ioc_update_cmd(args):
+    names = list(local_ioc.FEEDS) if args.include_adtracking else [name for name, cfg in local_ioc.FEEDS.items() if cfg['enabled_by_default']]
+    if args.include_adtracking and not args.license_reviewed:
+        raise ValueError('anti-AD 为上游聚合列表，请先核实特定用途与上游数据许可；确认后同时使用 --license-reviewed')
+    print('仅获取开源静态数据，不上传申请域名/IP；不会自动封禁。')
+    results = local_ioc.update_feeds(db=args.ioc_db, names=names)
+    for key, value in results.items():
+        print(f"{key}: {value['status']} ({value.get('count', value.get('error', '未知'))})")
+    print('原有成功缓存遇下载失败会保留；失败源不得当作无命中。')
+    return 0 if all(v['status'] == 'ok' for v in results.values()) else 1
+
+
+def ioc_import_cmd(args):
+    if args.feed not in local_ioc.FEEDS:
+        raise ValueError('非允许的数据源')
+    if args.feed == 'cn_antiad' and not args.license_reviewed:
+        raise ValueError('导入 anti-AD 需先审核聚合上游数据许可并设置 --license-reviewed')
+    p = Path(args.file).expanduser().resolve()
+    if not p.is_file() or p.stat().st_size > local_ioc.MAX_BYTES:
+        raise ValueError('源文件不存在或超出安全大小限制')
+    payload = p.read_bytes()
+    print('只从本地文件导入离线 IOC；不做任何外部请求、不会自动封禁。')
+    result = local_ioc.update_feeds(args.ioc_db, names=[args.feed], fetcher=lambda url: payload)
+    row = result[args.feed]
+    print(f"{args.feed}: {row['status']} ({row.get('count', row.get('error', '未知'))})")
+    return 0 if row['status']=='ok' else 1
+
+
+def ioc_status_cmd(args):
+    rows = local_ioc.list_feeds(db=args.ioc_db)
+    if not rows:
+        print('尚无本地 IOC 数据库或未成功更新。请执行 ioc-update。')
+        return 0
+    for row in rows:
+        print(f"{row['feed']}: {row['item_count']} 条 | 更新 {row['updated_at']} | SHA256 {row['sha256']} | {row['license']}")
+    return 0
+
+
+def ioc_check_cmd(args):
+    host, _ = validated_domain(args.domain)
+    res = local_ioc.inspect_cached(host, args.ip or [], db=args.ioc_db)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='免费域名安全检查：首次引导配置 API，自动生成 HTML 风险报告')
     sub = parser.add_subparsers(dest='command', required=True)
@@ -895,9 +999,29 @@ def main(argv=None):
     s_audit.add_argument('--markdown', action='store_true', help='额外生成旧版 Markdown 技术报告')
     s_audit.add_argument('--no-prompt', action='store_true', help='不弹出首次 API 配置向导，适用于自动化任务')
     s_audit.add_argument('--tls-probe', action='store_true', help='主动连接目标公网 IP 测试 TLS（默认禁用）')
+    s_audit.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB), help='本地安全名单 SQLite 路径')
+    s_audit.add_argument('--no-auto-ioc-update', action='store_true', help='禁用自动更新，仍使用现有本地缓存')
+    s_ioc_update = sub.add_parser('ioc-update', help='更新免费开源 IOC 名单；不发送被检测域名')
+    s_ioc_update.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB))
+    s_ioc_update.add_argument('--include-adtracking', action='store_true', help='可选安装 anti-AD，仅用于广告/跟踪线索')
+    s_ioc_update.add_argument('--license-reviewed', action='store_true', help='确认已核实 anti-AD 聚合上游数据许可')
+    s_ioc_import = sub.add_parser('ioc-import', help='从本地文件导入公开 IOC 清单')
+    s_ioc_import.add_argument('--feed', choices=list(local_ioc.FEEDS), required=True)
+    s_ioc_import.add_argument('--file', required=True)
+    s_ioc_import.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB))
+    s_ioc_import.add_argument('--license-reviewed', action='store_true')
+    s_ioc_status = sub.add_parser('ioc-status', help='查看规则库版本与更新时间')
+    s_ioc_status.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB))
+    s_ioc_check = sub.add_parser('ioc-check', help='使用本地 IOC 数据库离线检查')
+    s_ioc_check.add_argument('--domain', required=True)
+    s_ioc_check.add_argument('--ip', action='append')
+    s_ioc_check.add_argument('--ioc-db', default=str(local_ioc.DEFAULT_DB))
+
     args = parser.parse_args(argv)
     try:
-        return {'init': init_cmd, 'setup': init_cmd, 'set-key': set_key_cmd, 'doctor': doctor_cmd, 'audit': audit_cmd}[args.command](args)
+        return {'init': init_cmd, 'setup': init_cmd, 'set-key': set_key_cmd, 'doctor': doctor_cmd, 'audit': audit_cmd,
+                'ioc-update': ioc_update_cmd, 'ioc-import': ioc_import_cmd,
+                'ioc-status': ioc_status_cmd, 'ioc-check': ioc_check_cmd}[args.command](args)
     except (ValueError, FileNotFoundError, json.JSONDecodeError) as exc:
         parser.exit(2, f'参数/配置错误：{exc}\n')
     except KeyboardInterrupt:

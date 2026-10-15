@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.8.0",
+  "schema_version": "1.9.0",
   "report_id": "DEMO-NO-ACTUAL-SCAN",
   "checked_at": "2026-10-15T00:00:00Z",
   "domain": "example.com",
@@ -86,6 +86,36 @@
       "data": {},
       "error": null,
       "source_url": null
+    },
+    "local_ioc": {
+      "status": "ok",
+      "checked_at": "2026-10-15T00:00:00Z",
+      "summary": "合成示例：2 个公开规则库已检查，未命中；不代表域名安全",
+      "source_url": null,
+      "error": null,
+      "data": {
+        "matched": [],
+        "feeds": [
+          {
+            "feed": "cn_phishshield",
+            "title": "PhishShield（演示）",
+            "kind": "phishing_domain",
+            "updated_at": "2026-10-15T00:00:00Z",
+            "entries": 10,
+            "stale": false
+          },
+          {
+            "feed": "cn_ipguard",
+            "title": "IPGuard（演示）",
+            "kind": "attacking_ip",
+            "updated_at": "2026-10-15T00:00:00Z",
+            "entries": 10,
+            "stale": false
+          }
+        ],
+        "eligible_feeds": 2,
+        "target_not_uploaded": true
+      }
     }
   },
   "assessment": {

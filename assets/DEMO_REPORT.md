@@ -1,7 +1,7 @@
-# 虚构示例 · 域名安全报告
+# 合成演示：域名安全报告 V1.9
 
-目标域名：example.com
+这是虚构的报告样例，未真实查询任何域名。
 
-结论：信息不足，暂时无法判断。DNS、RDAP 等基础检查已完成，VirusTotal 和 urlscan 尚未配置；请参阅同目录 HTML 报告。
+增加了本地开源安全名单项：PhishShield、IPGuard；anti-AD 为可选广告追踪名单。
 
-该示例不代表真实查询结果。
+**未命中不等于安全。**请查看同目录 DEMO_REPORT.html。

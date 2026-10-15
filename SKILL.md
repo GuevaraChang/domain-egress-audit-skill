@@ -3,18 +3,19 @@ name: domain-egress-audit
 description: 通过公开数据源检查域名是否存在安全风险。首次主动引导配置可选免费 API，可由具备本地文件权限的 Agent 在会话接收 API Key 安全写入 .env；自动生成容易理解的 HTML 安全报告。
 ---
 
-# Domain Safety Check Skill · v1.8
+# Domain Safety Check Skill · v1.9
 
 ## 适用范围与原则
 
 当用户说“检查 example.com 是否安全”，自动执行公开情报校验并交付**简明 HTML 报告**。不需要用户创建 `business_context.json`。支持首次使用时引导申请可选 API，之后只需域名。不可宣称绝对安全或擅自修改网络策略。
 
-默认只使用以下来源：无需密钥的 **DNS / RDAP / RIPEstat / crt.sh**，以及可选的 **urlscan.io / VirusTotal**。不使用其他威胁情报 API、静态名单、自动扫描或需要人工提交的情报文件。首次或报告中也不应列出未集成的平台。
+默认使用：无需密钥的 **DNS / RDAP / RIPEstat / crt.sh**、**PhishShield / IPGuard 开源静态安全名单**，以及可选的 **urlscan.io / VirusTotal**。**anti-AD** 作为广告追踪信息来源，需要用户确认聚合许可后才能选择启用，不参与恶意 IOC 定性。无须注册开源名单的 API；不使用其他第三方情报厂商 API，不要求人工提交情报文件。
 
 - 默认仅被动查询第三方现有记录，**不主动访问目标站点**；仅用户明确同意 `--tls-probe` 才建立 TLS 连接，不发送 HTTP 请求。
 - 仅提交目标公开 FQDN；不要查询内部域名、包含密码或 Token 的 URL。
 - API 缺失、接口超额、网络错误必须单独标明“未检查”，不能视为安全。
 - VirusTotal 免费 Public API 有官方许可限制。仅用户确认具备适用授权时开启；否则不调用。
+- 本地开源 IOC 默认自动更新，更新失败保留缓存并提示过期；精确域名命中只是需复核的证据，解析 IP 命中通常是共享基础设施弱关联。
 - 仅得到历史跳转、域名较新等线索时，应说“需要进一步核实”，不是“确认恶意”。
 
 ## 第一步：引导配置 API
@@ -42,7 +43,7 @@ pip install -r requirements.txt
 python scripts/domain_audit.py audit --domain example.com
 ```
 
-交互式终端首次执行会主动提示配置 API；无人值守加 `--no-prompt`。自动检查格式、当前 DNS、域名注册信息、IP 归属、证书透明度历史、已配置的 API，以及最近同域名的历史快照。无需额外 JSON 或人工输入。
+交互式终端首次执行会主动提示配置 API；无人值守加 `--no-prompt`。自动检查格式、当前 DNS、域名注册信息、IP 归属、证书透明度历史、PhishShield/IPGuard 本地 IOC（自动更新或读取缓存）、已配置的 API，以及最近同域名的历史快照。无需额外 JSON 或人工输入。
 
 ## 第三步：HTML 结果
 
@@ -50,4 +51,4 @@ python scripts/domain_audit.py audit --domain example.com
 
 `未发现明显风险` 只指本次成功完成的检测；未配置域名信誉源时应报告信息不足，不能根据注册年限或证书存在便断言安全。不要将检测结论用作自动放行指令。
 
-参见 [API 配置指南](references/SERVICE_SETUP.md)、[风险判断规则](references/RISK_RULES.md)。
+参见 [API 配置指南](references/SERVICE_SETUP.md)、[风险判断规则](references/RISK_RULES.md)、[本地开源 IOC 数据源](references/LOCAL_IOC.md)。

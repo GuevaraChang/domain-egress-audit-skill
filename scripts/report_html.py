@@ -9,6 +9,7 @@ SOURCE_NAMES = {
     'rdap': '域名注册信息', 'dns': 'DNS 解析', 'ripestat': 'IP / 服务器归属',
     'crtsh': '网站证书历史', 'urlscan': '网站历史扫描',
     'virustotal': 'VirusTotal 安全检测', 'tls': 'HTTPS 连接测试',
+    'local_ioc': '免费开源安全名单',
 }
 
 def esc(value):
@@ -47,13 +48,20 @@ def source_view(key, item, problems):
     if matched:
         return ('warn', '发现线索', f'{title}发现需要核实的信息')
     if state == 'ok':
+        if key == 'local_ioc':
+            records = item.get('data') or {}
+            feeds = records.get('feeds') or []
+            if feeds and not records.get('eligible_feeds'):
+                return ('mute', '名单过期', '本地名单全部过期，不能视为已完成有效检查')
+            if any(f.get('stale') for f in feeds):
+                return ('warn', '部分过期', '部分本地情报未能及时更新，需谨慎解释结果')
         return ('ok', '已完成', f'{title}已查询；在本次规则范围内没有触发明显异常')
     if state == 'empty':
         return ('mute', '未找到数据', f'{title}未找到可用的历史记录')
     if state == 'skipped':
         return ('mute', '未检查', (item.get('summary') or '未启用此项检查'))
     if state == 'not_configured':
-        return ('mute', '未配置', f'{title}尚未配置 API Key，可运行 setup 补充')
+        return ('mute', '未准备', '本地安全名单尚未下载/导入' if key == 'local_ioc' else f'{title}尚未配置 API Key，可运行 setup 补充')
     return ('mute', '检查失败', f'{title}暂时无法取得有效结果，不能视为正常')
 
 
@@ -75,6 +83,7 @@ def render(report):
     mapping = {'rdap': {'new_domain', 'young_domain'}, 'dns': {'non_public_ip'},
                'virustotal': {'virustotal_detection'},
                'urlscan': {'off_domain_redirect'},
+               'local_ioc': {'local_phishing_ioc', 'local_ip_association', 'local_adtracking'},
                'tls': {'tls_probe_failed'}}
     positive = {k for k, v in mapping.items() if any(f.get('type') in v for f in display_findings)}
     def problem_card(f):
@@ -84,7 +93,7 @@ def render(report):
     problem_html = ''.join(problem_card(f) for f in display_findings[:7]) if display_findings else '<p class="quiet">本次成功完成的检查中，没有发现明显风险线索。</p>'
     successful = []
     unknown = []
-    for key in ('dns', 'rdap', 'ripestat', 'crtsh', 'urlscan', 'virustotal', 'tls'):
+    for key in ('dns', 'rdap', 'ripestat', 'crtsh', 'urlscan', 'local_ioc', 'virustotal', 'tls'):
         item = sources.get(key) or {}
         kind, state, detail = source_view(key, item, positive)
         row = f'<li><span>{esc(SOURCE_NAMES.get(key, key))}</span><span class="state {kind}">{esc(state)}</span></li>'

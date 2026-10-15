@@ -20,7 +20,7 @@ spec.loader.exec_module(a)
 class ChatKeyConfigTests(unittest.TestCase):
     def test_only_two_optional_credentials_supported(self):
         self.assertEqual(set(a.CREDENTIAL_NAMES), {'URLSCAN_API_KEY','VT_API_KEY'})
-        self.assertEqual(len(a.report_html.SOURCE_NAMES), 7)
+        self.assertEqual(len(a.report_html.SOURCE_NAMES), 8)
         for removed in ('OLD_API_KEY','UNSUPPORTED_API_KEY'):
             self.assertNotIn(removed, a.CONFIG_NAMES)
 
@@ -43,7 +43,7 @@ class ChatKeyConfigTests(unittest.TestCase):
             path = Path(temp)/'.env'
             with patch.object(a,'DEFAULT_ENV',path),patch.object(a.sys,'stdin',io.StringIO('ignored\n')):
                 with self.assertRaises(ValueError):
-                    a.set_key_cmd(Namespace(name='OTX_API_KEY', stdin=True, vt_tier=None))
+                    a.set_key_cmd(Namespace(name='UNSUPPORTED_API_KEY', stdin=True, vt_tier=None))
             self.assertFalse(path.exists())
 
     def test_empty_key_rejected(self):

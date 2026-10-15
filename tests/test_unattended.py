@@ -49,7 +49,8 @@ class Unattended(unittest.TestCase):
                          'sources':mocksrc,'asset_inventory':[], 'evidence_ledger':[],
                          'evidence_coverage':{},'assessment':{'risk_label':'证据不足','decision':'不放通','pending_items':['数据未知'], 'findings':[]}}
             fake_report['technical_assessment']=a.technical_assessment(fake_report)
-            with patch.object(a,'build_report',return_value=fake_report), \
+            with patch.object(a,'auto_refresh_local_ioc',return_value={'status':'fresh_cache'}), \
+                 patch.object(a,'build_report',return_value=fake_report), \
                  patch.object(a,'read_env',return_value={'VT_USAGE':'business'}), \
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(a.audit_cmd(args),0)

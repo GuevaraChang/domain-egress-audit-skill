@@ -22,6 +22,20 @@ def sample(sources=None, findings=None):
 
 
 class HtmlReportTests(unittest.TestCase):
+    def test_restored_open_source_ioc_rendered_and_stale_not_green(self):
+        from report_html import render, source_view
+        record = {'status':'ok','checked_at':'2026-10-15T11:00:00Z',
+                  'data':{'feeds':[{'feed':'cn_phishshield','stale':True}],
+                          'matched':[], 'eligible_feeds':0}}
+        label = source_view('local_ioc', record, set())
+        self.assertEqual(label[1], '名单过期')
+        sample = {'domain':'example.com','checked_at':'2026-10-15T11:00:00Z',
+                  'report_id':'TEST','assessment':{'findings':[]},
+                  'sources': {'local_ioc':record,'dns':{'status':'ok'},'virustotal':{'status':'skipped'}}}
+        page = render(sample)
+        self.assertIn('免费开源安全名单',page)
+        self.assertIn('名单过期',page)
+
     def test_four_plain_language_verdicts(self):
         ok = {key:a.source('ok') for key in ['dns','virustotal']}
         self.assertEqual(h.summarize(sample(ok))['level'],'clear')
@@ -64,7 +78,8 @@ class HtmlReportTests(unittest.TestCase):
             fake.update({'registered_domain':'example.net', 'business_context': {'context_status':'not_provided'},
                          'technical_assessment':{'label':'模拟测试'},'evidence_ledger':[],'asset_inventory':[],
                          'assessment':{'findings':[], 'pending_items':[]}})
-            with patch.object(a,'build_report',return_value=fake), contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(a,'auto_refresh_local_ioc',return_value={'status':'fresh_cache'}), \
+                 patch.object(a,'build_report',return_value=fake), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(a.audit_cmd(args),0)
             self.assertEqual(len(list(Path(temp).glob('*.html'))),1)
             self.assertEqual(len(list(Path(temp).glob('*.json'))),1)

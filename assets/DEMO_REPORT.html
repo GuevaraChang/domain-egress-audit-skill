@@ -26,8 +26,8 @@ a{color:#1d5aa6}footer{font-size:12px;color:#586679;line-height:1.7;margin-top:2
 <section class="panel hero unknown"><div class="small">检查结论</div><div class="status">信息不足，暂时无法判断</div>
 <p class="small">关键检查尚未完成：VirusTotal 域名信誉。</p><p class="recommend">建议：建议先补齐下方未完成的检查，再决定是否访问或输入敏感信息。</p></section>
 <section class="panel"><h2>发现的问题</h2><p class="quiet">本次成功完成的检查中，没有发现明显风险线索。</p></section>
-<section class="grid"><div class="panel"><h2>已经检查</h2><ul class="checklist"><li><span>DNS 解析</span><span class="state ok">已完成</span></li><li><span>域名注册信息</span><span class="state ok">已完成</span></li><li><span>IP / 服务器归属</span><span class="state ok">已完成</span></li><li><span>网站证书历史</span><span class="state ok">已完成</span></li></ul></div>
-<div class="panel"><h2>未完成或未配置</h2><ul class="checklist"><li><span>网站历史扫描</span><span class="state mute">未配置</span></li><li><span>VirusTotal 安全检测</span><span class="state mute">未配置</span></li><li><span>HTTPS 连接测试</span><span class="state mute">未检查</span></li></ul></div></section>
+<section class="grid"><div class="panel"><h2>已经检查</h2><ul class="checklist"><li><span>DNS 解析</span><span class="state ok">已完成</span></li><li><span>域名注册信息</span><span class="state ok">已完成</span></li><li><span>IP / 服务器归属</span><span class="state ok">已完成</span></li><li><span>网站证书历史</span><span class="state ok">已完成</span></li><li><span>免费开源安全名单</span><span class="state ok">已完成</span></li></ul></div>
+<div class="panel"><h2>未完成或未配置</h2><ul class="checklist"><li><span>网站历史扫描</span><span class="state mute">未准备</span></li><li><span>VirusTotal 安全检测</span><span class="state mute">未准备</span></li><li><span>HTTPS 连接测试</span><span class="state mute">未检查</span></li></ul></div></section>
 <section class="panel"><h2>技术详情（需要时再看）</h2><p class="small">点击展开即可查看原始证据，不需要阅读全部内容。</p><details><summary>DNS 解析 · 已完成</summary><p class="fine">示例：查询已完成　</p><pre>{
   &quot;ips&quot;: [
     {
@@ -51,6 +51,28 @@ a{color:#1d5aa6}footer{font-size:12px;color:#586679;line-height:1.7;margin-top:2
   &quot;registrar&quot;: &quot;Example Registrar&quot;
 }</pre></details><details><summary>IP / 服务器归属 · 已完成</summary><p class="fine">示例：网络归属查询已完成　</p><pre>{
   &quot;results&quot;: []
-}</pre></details><details><summary>网站证书历史 · 已完成</summary><p class="fine">示例：已查询证书历史　</p><pre>{}</pre></details><details><summary>网站历史扫描 · 未配置</summary><p class="fine">可配置 urlscan.io API Key 查询网页历史　</p><pre>{}</pre></details><details><summary>VirusTotal 安全检测 · 未配置</summary><p class="fine">可配置授权有效的 VirusTotal API Key 查询域名信誉　</p><pre>{}</pre></details><details><summary>HTTPS 连接测试 · 未检查</summary><p class="fine">默认不主动连接目标站点　</p><pre>{}</pre></details></section>
+}</pre></details><details><summary>网站证书历史 · 已完成</summary><p class="fine">示例：已查询证书历史　</p><pre>{}</pre></details><details><summary>网站历史扫描 · 未准备</summary><p class="fine">可配置 urlscan.io API Key 查询网页历史　</p><pre>{}</pre></details><details><summary>VirusTotal 安全检测 · 未准备</summary><p class="fine">可配置授权有效的 VirusTotal API Key 查询域名信誉　</p><pre>{}</pre></details><details><summary>HTTPS 连接测试 · 未检查</summary><p class="fine">默认不主动连接目标站点　</p><pre>{}</pre></details><details><summary>免费开源安全名单 · 已完成</summary><p class="fine">合成示例：2 个公开规则库已检查，未命中；不代表域名安全　</p><pre>{
+  &quot;matched&quot;: [],
+  &quot;feeds&quot;: [
+    {
+      &quot;feed&quot;: &quot;cn_phishshield&quot;,
+      &quot;title&quot;: &quot;PhishShield（演示）&quot;,
+      &quot;kind&quot;: &quot;phishing_domain&quot;,
+      &quot;updated_at&quot;: &quot;2026-10-15T00:00:00Z&quot;,
+      &quot;entries&quot;: 10,
+      &quot;stale&quot;: false
+    },
+    {
+      &quot;feed&quot;: &quot;cn_ipguard&quot;,
+      &quot;title&quot;: &quot;IPGuard（演示）&quot;,
+      &quot;kind&quot;: &quot;attacking_ip&quot;,
+      &quot;updated_at&quot;: &quot;2026-10-15T00:00:00Z&quot;,
+      &quot;entries&quot;: 10,
+      &quot;stale&quot;: false
+    }
+  ],
+  &quot;eligible_feeds&quot;: 2,
+  &quot;target_not_uploaded&quot;: true
+}</pre></details></section>
 <footer>报告编号：DEMO-NO-ACTUAL-SCAN。由公开数据源自动生成，只代表当前成功完成的检查；未查到不等于绝对安全。报告不主动批准、拦截或修改任何网络访问。</footer>
 </main></body></html>

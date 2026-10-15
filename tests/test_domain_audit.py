@@ -75,7 +75,8 @@ class TestDomainAudit(unittest.TestCase):
              patch.object(audit, 'ripestat_check', return_value=audit.source('ok', data={'results': []})), \
              patch.object(audit, 'crt_check', return_value=audit.source('ok', data={})), \
              patch.object(audit, 'urlscan_check', return_value=audit.source('not_configured')), \
-             patch.object(audit, 'tls_check', return_value=audit.source('skipped')):
+             patch.object(audit, 'tls_check', return_value=audit.source('skipped')), \
+             patch.object(audit.local_ioc, 'inspect_cached', return_value=audit.source('not_configured')):
             report = audit.build_report('example.com', 'example.com', {}, env={})
         self.assertEqual(report['domain'], 'example.com')
         self.assertEqual(report['sources']['dns']['status'], 'ok')
@@ -302,10 +303,11 @@ class TestDomainAudit(unittest.TestCase):
              patch.object(audit, 'ripestat_check', return_value=audit.source('skipped')), \
              patch.object(audit, 'crt_check', return_value=audit.source('empty')), \
              patch.object(audit, 'urlscan_check', return_value=audit.source('not_configured')), \
-             patch.object(audit, 'tls_check', return_value=audit.source('skipped')):
+             patch.object(audit, 'tls_check', return_value=audit.source('skipped')), \
+             patch.object(audit.local_ioc, 'inspect_cached', return_value=audit.source('not_configured')):
             report = audit.build_report('example.com', 'example.com', {'usage_type': 'business'}, env={})
-        self.assertEqual(report['schema_version'], '1.8.0')
-        self.assertEqual(len(report['evidence_ledger']), 7)
+        self.assertEqual(report['schema_version'], '1.9.0')
+        self.assertEqual(len(report['evidence_ledger']), 8)
         self.assertIn('cdn.vendor.com', [x['hostname'] for x in report['asset_inventory']])
         md = audit.render_markdown(report)
         self.assertIn('已检查与未检查', md)
