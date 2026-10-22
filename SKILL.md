@@ -3,13 +3,15 @@ name: domain-egress-audit
 description: 通过公开数据源检查域名是否存在安全风险。首次主动引导配置可选免费 API，可由具备本地文件权限的 Agent 在会话接收 API Key 安全写入 .env；自动生成容易理解的 HTML 安全报告。
 ---
 
-# Domain Safety Check Skill · v2.2
+# Domain Safety Check Skill · v2.4
 
 ## 适用范围与原则
 
 当用户说“检查 example.com 是否安全”，自动执行公开情报校验并交付**简明 HTML 报告**。不需要用户创建 `business_context.json`。支持首次使用时引导申请可选 API，之后只需域名。不可宣称绝对安全或擅自修改网络策略。
 
 默认使用：无需密钥的 **DNS / RDAP / RIPEstat / crt.sh**、**PhishShield / IPGuard 开源静态安全名单**，以及可选的 **urlscan.io / VirusTotal**。**anti-AD** 默认作为广告追踪辅助线索（不得当作恶意 IOC 定性），使用者应核对聚合上游的许可，不参与恶意 IOC 定性。无须注册开源名单的 API；不使用其他第三方情报厂商 API，不要求人工提交情报文件。
+
+- VirusTotal 必须**同时读取两个对象**：`GET /v3/domains/{host}`（域名对象）与 `GET /v3/urls/{sha256(scheme://host/)}`（URL 对象）。二者独立扫描、独立统计，只查域名对象会漏掉 URL 级 phishing/malware 判定的报毒。两对象结果分别输出 `domain_object` / `url_object`，并按对象分别给出风险线索（`vt_scope`）。均为纯 GET，404 表示无既有记录，不得因此提交新扫描。
 
 - 默认读取第三方已有历史扫描详细结果，同时自动进行 TLS 握手检查（不发送 HTTP 请求）。urlscan 仅查询已有记录与详情，不提交新的网页扫描任务。
 - 对外查询仅发送目标公开 FQDN；不要查询内部域名、包含密码或 Token 的 URL。

@@ -1,3 +1,12 @@
+## V2.4 — VirusTotal 同时读取域名对象与 URL 对象（修复漏报）
+
+- **修复漏报**：原实现只查 `GET /v3/domains/{host}`（域名对象）。VT 的域名级与 URL 级判定是两个独立对象、独立扫描、独立统计，只查域名会**完全漏掉 URL 级报毒**。实测 `www.psbc.cn` 域名对象 malicious=0，而 URL 对象 `https://www.psbc.cn/` malicious=4（Netcraft、Webroot 报 Malicious，Emsisoft、Fortinet 报 Phishing），此前不可见。
+- 新增 `GET /v3/urls/{sha256(scheme://host/)}` 读取 URL 对象既有判定；纯 GET，不提交任何新扫描。404 视为「无既有记录」并写入 `url_object_lookup`，不报错、不触发扫描。
+- 结果结构新增 `domain_object` / `url_object`（各自含 `stats`、`flagged_engines`、`last_analysis_date`、`gui_url`），并保留 `combined_stats`（两对象逐项取较大值）兼容旧字段读取。
+- 风险线索 `virustotal_detection` 按对象分别产出（带 `vt_scope: domain|url`），线索正文列出具体报毒引擎名与判定，便于区分类目型误报。
+- 严重度分级：malicious≥5 记 high，1–4 记 medium；仅 suspicious 记 low。`report_html.summarize` 的 `intel_ok` 放宽为 `ok|partial`，避免 URL 对象查询失败时整份报告降级为“信息不足”。
+- 新增 4 个测试：双对象分别命中、域名干净但 URL 报毒不被掩盖、URL 404 不算提交、评估阶段按对象分别出线索。全量 71 项测试通过。
+
 ## V2.3 — 取消实时网页扫描提交
 
 - 移除 urlscan 实时提交实现及相关 CLI 选项；已有 Key 和历史空结果均不会触发新扫描。

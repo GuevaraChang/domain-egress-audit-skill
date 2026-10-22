@@ -25,7 +25,7 @@ def summarize(report):
     # Do not rate a domain clear unless DNS and one real reputation API completed.
     # RDAP is context only and never proves a benign domain.
     dns_ok = (sources.get('dns') or {}).get('status') == 'ok'
-    intel_ok = (sources.get('virustotal') or {}).get('status') == 'ok'
+    intel_ok = (sources.get('virustotal') or {}).get('status') in ('ok', 'partial')
     if high:
         return dict(level='danger', title='发现严重风险', recommendation='不建议访问这个域名。优先核实恶意情报并停止输入信息或下载文件。',
                     reason='发现至少一条明确的高风险证据。')

@@ -13,6 +13,12 @@ audit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(audit)
 
 
+class _Resp:
+    """Minimal stand-in for requests.Response so HTTPError can carry a status code."""
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
 class TestDomainAudit(unittest.TestCase):
     def test_domain_validation(self):
         self.assertEqual(audit.validated_domain(' API.Example.COM. '), ('api.example.com', 'example.com'))
@@ -133,17 +139,63 @@ class TestDomainAudit(unittest.TestCase):
         self.assertEqual(result['status'], 'not_configured')
 
     def test_virustotal_noncommercial_uses_v3_get_domain(self):
-        data = {'data': {'attributes': {'last_analysis_stats': {
+        # domain 对象与 url 对象分别命中不同接口，二者都要读取。
+        domain_data = {'data': {'attributes': {'last_analysis_stats': {
             'malicious': 2, 'suspicious': 1, 'harmless': 12, 'undetected': 50},
-            'last_analysis_date': 1760000000, 'reputation': -3}}}
-        with patch.object(audit, 'req_json', return_value=data) as mocked:
+            'last_analysis_date': 1760000000, 'reputation': -3,
+            'last_analysis_results': {'Kaspersky': {'result': 'clean', 'category': 'harmless'},
+                                      'Netcraft': {'result': 'malicious', 'category': 'malicious'}}}}}
+        url_data = {'data': {'attributes': {'last_analysis_stats': {
+            'malicious': 0, 'suspicious': 0, 'harmless': 20, 'undetected': 40},
+            'last_analysis_date': 1760000000, 'reputation': 0,
+            'last_analysis_results': {'Kaspersky': {'result': 'clean', 'category': 'harmless'}}}}}
+        calls = []
+        def fake_req_json(url, **kwargs):
+            calls.append((url, kwargs))
+            return domain_data if '/domains/' in url else url_data
+        with patch.object(audit, 'req_json', side_effect=fake_req_json):
             result = audit.vt_check('example.com', 'local-key', 'noncommercial')
         self.assertEqual(result['status'], 'ok')
-        self.assertEqual(result['data']['last_analysis_stats']['malicious'], 2)
-        self.assertEqual(result['data']['last_analysis_stats']['suspicious'], 1)
-        self.assertEqual(mocked.call_args.args[0], 'https://www.virustotal.com/api/v3/domains/example.com')
-        self.assertEqual(mocked.call_args.kwargs['headers'], {'x-apikey': 'local-key'})
+        self.assertEqual(result['data']['domain_object']['stats']['malicious'], 2)
+        self.assertEqual(result['data']['url_object']['stats']['malicious'], 0)
+        # 合并统计取两个对象的较大值，避免 URL 级恶意被域名级 0 掩盖
+        self.assertEqual(result['data']['combined_stats']['malicious'], 2)
+        self.assertEqual(calls[0][0], 'https://www.virustotal.com/api/v3/domains/example.com')
+        self.assertTrue(calls[1][0].startswith('https://www.virustotal.com/api/v3/urls/'))
+        self.assertEqual(calls[0][1]['headers'], {'x-apikey': 'local-key'})
         self.assertNotIn('local-key', str(result))
+        self.assertEqual([e['engine'] for e in result['data']['domain_object']['flagged_engines']], ['Netcraft'])
+        self.assertEqual(result['data']['url_object']['target'], 'https://example.com/')
+
+    def test_virustotal_url_object_flag_not_masked_by_clean_domain(self):
+        """域名对象干净、URL 对象报毒时，必须报出恶意，不能被域名级 0 掩盖。"""
+        domain_data = {'data': {'attributes': {'last_analysis_stats': {
+            'malicious': 0, 'suspicious': 0, 'harmless': 60, 'undetected': 30},
+            'last_analysis_results': {}}}}
+        url_data = {'data': {'attributes': {'last_analysis_stats': {
+            'malicious': 4, 'suspicious': 1, 'harmless': 54, 'undetected': 34},
+            'last_analysis_results': {
+                'Netcraft': {'result': 'malicious', 'category': 'malicious'},
+                'Emsisoft': {'result': 'phishing', 'category': 'phishing'}}}}}
+        def fake_req_json(url, **kwargs):
+            return domain_data if '/domains/' in url else url_data
+        with patch.object(audit, 'req_json', side_effect=fake_req_json):
+            result = audit.vt_check('example.com', 'local-key', 'noncommercial')
+        self.assertEqual(result['data']['combined_stats']['malicious'], 4)
+        self.assertEqual(result['data']['combined_stats']['suspicious'], 1)
+        self.assertIn('恶意', result['summary'])
+
+    def test_virustotal_url_object_404_is_not_a_submission(self):
+        """URL 对象无历史记录时返回 404，只记录“未提交新扫描”，不得上报错误。"""
+        def fake_req_json(url, **kwargs):
+            if '/domains/' in url:
+                return {'data': {'attributes': {'last_analysis_stats': {'malicious': 0}}}}
+            raise audit.requests.HTTPError('404', response=_Resp(404))
+        with patch.object(audit, 'req_json', side_effect=fake_req_json):
+            result = audit.vt_check('example.com', 'local-key', 'noncommercial')
+        self.assertEqual(result['status'], 'ok')
+        self.assertIsNone(result['error'])
+        self.assertTrue(any('无既有分析记录' in x for x in result['data']['url_object_lookup']))
 
     def test_virustotal_api_error_is_not_zero_hit(self):
         with patch.object(audit, 'req_json', side_effect=audit.requests.HTTPError('429')):
@@ -163,10 +215,38 @@ class TestDomainAudit(unittest.TestCase):
             'rdap','dns','urlscan','tls','crtsh','ripestat')}
         sources['dns']['data'] = {'ips': []}
         sources['virustotal'] = audit.source('ok', data={
-            'last_analysis_stats': {'malicious': 2, 'suspicious': 1}})
-        result = audit.evaluate({'sources': sources, 'business_context': {}})
-        self.assertIn('virustotal_detection', [f['type'] for f in result['findings']])
+            'combined_stats': {'malicious': 2, 'suspicious': 1},
+            'domain_object': {'stats': {'malicious': 2, 'suspicious': 1},
+                              'flagged_engines': [{'engine': 'Netcraft', 'result': 'malicious'}]},
+            'url_object': {'target': 'https://example.com/',
+                           'stats': {'malicious': 0, 'suspicious': 0}}})
+        result = audit.evaluate({'sources': sources, 'business_context': {},
+                                 'domain': 'example.com'})
+        types = [f['type'] for f in result['findings']]
+        self.assertIn('virustotal_detection', types)
+        scopes = [f.get('vt_scope') for f in result['findings'] if f['type'] == 'virustotal_detection']
+        self.assertEqual(scopes, ['domain'])
         self.assertNotIn('高风险', result['risk_label'])
+        self.assertFalse(result['automatic_approval'])
+
+    def test_vt_url_scope_detection_is_reported_separately(self):
+        """域名对象干净、URL 对象报毒时，评估阶段也必须各自出一条线索。"""
+        sources = {k: audit.source('skipped') for k in (
+            'rdap','dns','urlscan','tls','crtsh','ripestat')}
+        sources['dns']['data'] = {'ips': []}
+        sources['virustotal'] = audit.source('ok', data={
+            'combined_stats': {'malicious': 4, 'suspicious': 1},
+            'domain_object': {'stats': {'malicious': 0, 'suspicious': 0}, 'flagged_engines': []},
+            'url_object': {'target': 'https://example.com/',
+                           'stats': {'malicious': 4, 'suspicious': 1},
+                           'flagged_engines': [{'engine': 'Netcraft', 'result': 'malicious'},
+                                               {'engine': 'Emsisoft', 'result': 'phishing'}]}})
+        result = audit.evaluate({'sources': sources, 'business_context': {},
+                                 'domain': 'example.com'})
+        hits = [f for f in result['findings'] if f['type'] == 'virustotal_detection']
+        self.assertEqual([f['vt_scope'] for f in hits], ['url'])
+        self.assertIn('Netcraft', hits[0]['detail'])
+        self.assertEqual(hits[0]['severity'], 'medium')
         self.assertFalse(result['automatic_approval'])
 
     def test_doctor_no_vt_request_without_permission(self):

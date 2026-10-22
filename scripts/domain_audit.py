@@ -38,6 +38,8 @@ UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 URLSCAN_HISTORY_DEFAULT = 15
 URLSCAN_HISTORY_LIMIT = 50
 VT_DOMAIN_API = 'https://www.virustotal.com/api/v3/domains'
+VT_URLS_API = 'https://www.virustotal.com/api/v3/urls'
+
 VT_POLICY_URL = 'https://docs.virustotal.com/reference/public-vs-premium-api'
 VT_KEY_URL = 'https://www.virustotal.com/gui/my-apikey'
 RIPESTAT_API = 'https://stat.ripe.net/data/network-info/data.json'
@@ -438,8 +440,49 @@ def effective_vt_usage(env, ctx=None):
     return 'noncommercial' if str(env.get('VT_USAGE', '')).strip().lower() == 'noncommercial' else 'not_enabled'
 
 
+def vt_url_hash(scheme, host):
+    """sha256 of the normalised URL, which is the VT v3 URL-object key.
+
+    VT normalises a bare origin to 'scheme://host/' and keys it by sha256. Unlike
+    the /analyses/{id} form (u-{sha256}-{timestamp}), the plain hash is stable and
+    returns the URL object's accumulated last_analysis_* verdicts.
+    """
+    import hashlib
+    return hashlib.sha256(f'{scheme}://{host}/'.encode('utf-8')).hexdigest()
+
+
+def _vt_stats(raw_attrs):
+    stats = raw_attrs.get('stats') or raw_attrs.get('last_analysis_stats') or {}
+    return {key: int(stats.get(key, 0) or 0)
+            for key in ('malicious', 'suspicious', 'harmless', 'undetected', 'timeout')}
+
+
+def _vt_flagging_engines(results):
+    """Collect engines that did not return clean/undetected/unrated."""
+    flagged = []
+    for engine, verdict in (results or {}).items():
+        result = str((verdict or {}).get('result') or '').lower()
+        category = str((verdict or {}).get('category') or '').lower()
+        if result in ('', 'clean', 'undetected', 'unrated', 'failure', 'type unsupported'):
+            continue
+        if category in ('undetected',) and result == 'unrated':
+            continue
+        flagged.append({'engine': engine, 'category': category, 'result': result})
+    flagged.sort(key=lambda x: (x['result'] != 'malicious', x['engine']))
+    return flagged
+
+
 def vt_check(host, api_key, usage):
-    """Read an existing VirusTotal domain report; never submit a URL for scanning."""
+    """Read existing VirusTotal reports for BOTH the domain and the URL object.
+
+    VT keeps domain-level and URL-level verdicts as separate objects that can
+    disagree (a host can be clean as a domain yet flagged as a URL). Querying only
+    /v3/domains silently hides URL-level phishing/malware flags, so both are read.
+
+    Never submits a URL for scanning: /analyses/{id} returns the latest existing
+    analysis, and a 404 is reported as 'no existing record' rather than triggering
+    a submission.
+    """
     if not api_key:
         return source('not_configured', summary='未配置 VirusTotal API Key',
                       data={'api_called': False}, url=VT_KEY_URL)
@@ -447,22 +490,87 @@ def vt_check(host, api_key, usage):
         return source('skipped', summary='需要确认已获得符合使用条款的 API 权限',
                       data={'skip_reason': 'permission_not_confirmed', 'api_called': False},
                       url=VT_POLICY_URL)
-    url = VT_DOMAIN_API + '/' + quote(host, safe='')
+
+    headers = {'x-apikey': api_key}
+    data = {'api_called': True}
+    errors = []
+    domain_stats = url_stats = None
+
+    # --- 1) domain object -------------------------------------------------
     try:
-        raw = req_json(url, headers={'x-apikey': api_key})
+        raw = req_json(VT_DOMAIN_API + '/' + quote(host, safe=''), headers=headers)
         attrs = (raw.get('data') or {}).get('attributes') or {}
-        stats = attrs.get('last_analysis_stats') or {}
-        values = {key: int(stats.get(key, 0) or 0) for key in ('malicious', 'suspicious', 'harmless', 'undetected', 'timeout')}
+        domain_stats = _vt_stats(attrs)
+        data['last_analysis_stats'] = domain_stats
         stamp = attrs.get('last_analysis_date')
-        analysis_date = datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat() if isinstance(stamp, (int, float)) else None
-        return source('ok', summary='已读取 VirusTotal 既有域名检测结果',
-            data={'api_called': True, 'last_analysis_stats': values,
-                  'last_analysis_date': analysis_date, 'reputation': attrs.get('reputation')},
-            url='https://www.virustotal.com/gui/domain/' + quote(host, safe=''))
+        data['last_analysis_date'] = (datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat()
+                                      if isinstance(stamp, (int, float)) else None)
+        data['reputation'] = attrs.get('reputation')
+        data['domain_object'] = {
+            'stats': domain_stats,
+            'last_analysis_date': data['last_analysis_date'],
+            'reputation': attrs.get('reputation'),
+            'flagged_engines': _vt_flagging_engines(attrs.get('last_analysis_results')),
+            'gui_url': 'https://www.virustotal.com/gui/domain/' + quote(host, safe=''),
+        }
+    except requests.HTTPError as exc:
+        code = exc.response.status_code if exc.response is not None else None
+        errors.append(f'domain 对象查询失败（HTTP {code or "?"}）')
     except (requests.RequestException, ValueError, KeyError, TypeError, OverflowError) as exc:
-        return source('error', summary='VirusTotal 查询失败，不能当成无风险', error=exc,
-                      data={'api_called': True},
-                      url='https://www.virustotal.com/gui/domain/' + quote(host, safe=''))
+        errors.append('domain 对象查询失败（%s）' % type(exc).__name__)
+
+    # --- 2) url object (existing verdicts only) ---------------------------
+    # GET /v3/urls/{sha256} reads the accumulated URL-object verdicts. It is a
+    # pure GET and never submits the URL for a new scan.
+    for scheme in ('https', 'http'):
+        target = f'{scheme}://{host}/'
+        try:
+            raw = req_json(VT_URLS_API + '/' + vt_url_hash(scheme, host), headers=headers)
+            attrs = (raw.get('data') or {}).get('attributes') or {}
+            url_stats = _vt_stats(attrs)
+            stamp = attrs.get('last_analysis_date')
+            data['url_object'] = {
+                'target': target,
+                'stats': url_stats,
+                'last_analysis_date': (datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat()
+                                       if isinstance(stamp, (int, float)) else None),
+                'reputation': attrs.get('reputation'),
+                'flagged_engines': _vt_flagging_engines(attrs.get('last_analysis_results'))[:15],
+                'gui_url': 'https://www.virustotal.com/gui/url/' + vt_url_hash(scheme, host),
+            }
+            break
+        except requests.HTTPError as exc:
+            code = exc.response.status_code if exc.response is not None else None
+            if code == 404:
+                data.setdefault('url_object_lookup', []).append(f'{target}：无既有分析记录（未提交新扫描）')
+            else:
+                errors.append(f'url 对象查询失败（HTTP {code or "?"}）')
+        except (requests.RequestException, ValueError, KeyError, TypeError, OverflowError) as exc:
+            errors.append('url 对象查询失败（%s）' % type(exc).__name__)
+
+    # --- 3) combine -------------------------------------------------------
+    if domain_stats or url_stats:
+        merged = {key: max((domain_stats or {}).get(key, 0), (url_stats or {}).get(key, 0))
+                  for key in ('malicious', 'suspicious', 'harmless', 'undetected', 'timeout')}
+        data['combined_stats'] = merged
+    else:
+        merged = None
+
+    if merged and merged.get('malicious'):
+        summary = (f'VirusTotal 检出恶意：域名对象 malicious={(domain_stats or {}).get("malicious", 0)}、'
+                   f'URL 对象 malicious={(url_stats or {}).get("malicious", 0)}；需核实具体引擎')
+    elif merged and merged.get('suspicious'):
+        summary = ('VirusTotal 无恶意检出，但存在可疑标记（'
+                   f'域名 {((domain_stats or {}).get("suspicious", 0))} / '
+                   f'URL {((url_stats or {}).get("suspicious", 0))}），需核实具体引擎')
+    elif merged:
+        summary = 'VirusTotal 域名与 URL 两个对象均无恶意或可疑检出'
+    else:
+        summary = 'VirusTotal 查询失败，不能当成无风险'
+
+    status = 'ok' if merged and not errors else ('partial' if merged else 'error')
+    return source(status, summary=summary, data=data, error='；'.join(errors) or None,
+                  url='https://www.virustotal.com/gui/domain/' + quote(host, safe=''))
 
 
 def tls_check(host, port, ips, enabled=False):
@@ -644,6 +752,7 @@ def attach_baseline(report, previous):
 def evaluate(report):
     src = report['sources']
     ctx = report['business_context']
+    host = report.get('domain') or ctx.get('target_fqdn') or ''
     ev = {row['source']:row['id'] for row in report.get('evidence_ledger', [])}
     def ids(*names):
         return [ev[name] for name in names if name in ev]
@@ -668,12 +777,28 @@ def evaluate(report):
     if any(not x['globally_routable'] for x in ips):
         findings.append({'severity': 'medium', 'type': 'non_public_ip', 'confidence': 'high', 'evidence_ids': ids('dns'), 'detail': '外部域名解析结果出现非公网地址，需排查分视图、私有解析或污染'})
     vt = src.get('virustotal', source('skipped', summary='旧版报告未包含 VirusTotal'))
-    if vt['status'] == 'ok':
-        stats = vt['data'].get('last_analysis_stats') or {}
-        malicious, suspicious = stats.get('malicious', 0), stats.get('suspicious', 0)
-        if malicious or suspicious:
-            findings.append({'severity': 'medium', 'type': 'virustotal_detection', 'confidence': 'medium', 'evidence_ids': ids('virustotal'),
-                             'detail': f'VirusTotal 既有分析中 malicious={malicious}, suspicious={suspicious}；需核实具体引擎和时效，不能直接判定恶意'})
+    if vt['status'] in ('ok', 'partial'):
+        # 域名对象与 URL 对象在 VT 中独立判定，必须分别取用，不能只看其中一个。
+        dom = vt['data'].get('domain_object') or {}
+        url_obj = vt['data'].get('url_object') or {}
+        d_stats, u_stats = dom.get('stats') or {}, url_obj.get('stats') or {}
+        for scope, label, blob in (('domain', '域名对象', dom), ('url', 'URL 对象', url_obj)):
+            stats = blob.get('stats') or {}
+            malicious, suspicious = stats.get('malicious', 0), stats.get('suspicious', 0)
+            if not (malicious or suspicious):
+                continue
+            engines = blob.get('flagged_engines') or []
+            engine_desc = '、'.join(f'{e["engine"]}({e["result"]})' for e in engines[:6]) or '未返回逐引擎明细'
+            severity = 'high' if malicious >= 5 else 'medium'
+            confidence = 'medium' if malicious else 'low'
+            findings.append({
+                'severity': severity, 'type': 'virustotal_detection', 'confidence': confidence,
+                'evidence_ids': ids('virustotal'),
+                'detail': (f'VirusTotal {label}：malicious={malicious}, suspicious={suspicious}'
+                           f'（对象：{url_obj.get("target") if scope == "url" else host}）；'
+                           f'报毒引擎：{engine_desc}。域名与 URL 是两个独立对象，需核实具体引擎、类目型误报可能及时效，不能直接判定恶意'),
+                'vt_scope': scope,
+            })
     elif vt['status'] in ('not_configured', 'error') and ctx.get('manual_threat_review_completed') is not True:
         pending.append('VirusTotal 数据不可用')
     # vt.status=skipped 且因为某些用途限制时，是合规跳过而不是技术无风险。
