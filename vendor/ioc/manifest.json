@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-19T07:49:12+00:00",
+  "generated_at": "2026-10-26T07:49:46+00:00",
   "feeds": {
     "cn_phishshield": {
       "file": "phishshield_blacklist.js",
@@ -20,8 +20,8 @@
     },
     "cn_antiad": {
       "file": "anti_ad_domains.txt",
-      "sha256": "7f9f2f1eb30b3c9bc3a1098c9792ee65311906cc1d982610b7cdf5e360d26d9d",
-      "entries": 110523,
+      "sha256": "5a02a3399cb021d59b81bcd495b2928a443496296441acf92102bb40d26aec11",
+      "entries": 112823,
       "license": "仓库 MIT；聚合上游许可需要机构额外核实",
       "source_url": "https://raw.githubusercontent.com/privacy-protection-tools/anti-AD/master/anti-ad-domains.txt",
       "project_url": "https://github.com/privacy-protection-tools/anti-AD"
